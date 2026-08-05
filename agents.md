@@ -10,8 +10,8 @@
 
 | 角色 | 职责 |
 |------|------|
-| **worker** | 编写代码，严格按 Java 原始实现 1:1 移植，禁止偷懒（空实现/TODO/占位除非原代码有） |
-| **verifier** | 严格验收 worker 的代码，对比 Java 源码，找出所有方法签名差异、语义偏离、遗漏 |
+| **worker** | 编写代码，严格按 spec.md 实现，禁止偷懒（空实现/TODO/占位除非规格明确允许） |
+| **verifier** | 严格验收 worker 的代码，对比 spec.md 与测试，找出所有接口差异、语义偏离、遗漏 |
 | **fixer** | 根据 verifier 报告修复所有问题，不得遗漏 |
 | **re-verifier** | 确认 fixer 的修复到位，验证通过则闭环 |
 
@@ -33,15 +33,14 @@ worker 编写代码
 
 ## 代码规范
 
-- 所有 Rust 文件须包含 Oracle 版权头和 SPDX 许可证标识
-- 保持与 Java 原代码相同的方法签名和语义
-- 模块名 `JVMCI` → `RustCI`（仅顶层命名变更）
+- 所有 Rust 文件须包含统一的版权头和 SPDX 许可证标识
+- 保持与 spec.md 一致的接口签名和语义
 - 禁止添加无关注释，像专业程序员一样写代码
 
 ## Source Map 管理
 
 - 主协调者维护 `docs/source-map/` 目录下的 MD 文件
-- 每个 Java 类到 Rust 文件的映射需记录状态（todo/in_progress/done）
+- 每个规格模块/组件到 Rust 文件的映射需记录状态（todo/in_progress/done）
 - 子代理完成任务后须回写 source map
 
 ## Git 规范
