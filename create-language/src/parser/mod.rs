@@ -81,14 +81,14 @@ impl Parser {
     pub fn match_literal(&mut self) -> Option<Literal> {
         match self.peek_kind() {
             Some(TokenKind::Int(v)) => {
-                let v = v;
+                let val = v;
                 self.advance();
-                Some(Literal::Int(v))
+                Some(Literal::Int(val))
             }
             Some(TokenKind::Float(v)) => {
-                let v = v;
+                let val = v;
                 self.advance();
-                Some(Literal::Float(v))
+                Some(Literal::Float(val))
             }
             Some(TokenKind::String(ref s)) => {
                 let s = s.clone();
@@ -96,9 +96,9 @@ impl Parser {
                 Some(Literal::String(s))
             }
             Some(TokenKind::Char(c)) => {
-                let c = c;
+                let ch = c;
                 self.advance();
-                Some(Literal::Char(c))
+                Some(Literal::Char(ch))
             }
             Some(TokenKind::True) => {
                 self.advance();
@@ -165,7 +165,7 @@ impl Parser {
     }
 
     pub fn check(&self, kind: &TokenKind) -> bool {
-        self.peek_kind().map_or(false, |k| k == *kind)
+        self.peek_kind().is_some_and(|k| k == *kind)
     }
 
     pub fn advance(&mut self) {

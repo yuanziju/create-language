@@ -363,7 +363,7 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        if self.current == Some('.') && self.peek().map_or(false, |c| c.is_ascii_digit()) {
+        if self.current == Some('.') && self.peek().is_some_and(|c| c.is_ascii_digit()) {
             self.advance();
             while let Some(c) = self.current {
                 if c.is_ascii_digit() {
@@ -377,7 +377,7 @@ impl<'a> Lexer<'a> {
                 if self.current == Some('+') || self.current == Some('-') {
                     self.advance();
                 }
-                if !self.current.map_or(false, |c| c.is_ascii_digit()) {
+                if !self.current.is_some_and(|c| c.is_ascii_digit()) {
                     return Err(self.error("expected exponent digits".to_string()));
                 }
                 while let Some(c) = self.current {
