@@ -1,9 +1,15 @@
 use crate::instruction::Instruction;
 use crate::vm::error::VmResult;
+use crate::vm::executor::Executor;
 use crate::vm::memory::{CallFrame, CompilationTier, RuntimeValue};
 
 pub trait ExecutionBackend {
-    fn ExecuteFrame(&mut self, frame: &mut CallFrame, instructions: &[Instruction]) -> VmResult<()>;
+    fn ExecuteFrame(
+        &mut self,
+        executor: &mut Executor,
+        frame: &mut CallFrame,
+        instructions: &[Instruction],
+    ) -> VmResult<()>;
 }
 
 pub struct DeoptContext {

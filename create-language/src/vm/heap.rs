@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use super::value::*;
 use super::gc_strategy::GcStrategy;
+use super::value::*;
 
 const YOUNG_GEN_MAX: usize = 1024;
 const OLD_GEN_MAX: usize = 4096;
@@ -82,32 +82,48 @@ impl Heap {
 
     fn find(&self, gcRef: GcRef) -> &GcObject {
         for obj in &self.youngGen {
-            if obj.id == gcRef.0 { return obj; }
+            if obj.id == gcRef.0 {
+                return obj;
+            }
         }
         for obj in &self.survivorFrom {
-            if obj.id == gcRef.0 { return obj; }
+            if obj.id == gcRef.0 {
+                return obj;
+            }
         }
         for obj in &self.survivorTo {
-            if obj.id == gcRef.0 { return obj; }
+            if obj.id == gcRef.0 {
+                return obj;
+            }
         }
         for obj in &self.oldGen {
-            if obj.id == gcRef.0 { return obj; }
+            if obj.id == gcRef.0 {
+                return obj;
+            }
         }
         panic!("GcRef({}) not found in any generation", gcRef.0);
     }
 
     fn find_mut(&mut self, gcRef: GcRef) -> &mut GcObject {
         for obj in &mut self.youngGen {
-            if obj.id == gcRef.0 { return obj; }
+            if obj.id == gcRef.0 {
+                return obj;
+            }
         }
         for obj in &mut self.survivorFrom {
-            if obj.id == gcRef.0 { return obj; }
+            if obj.id == gcRef.0 {
+                return obj;
+            }
         }
         for obj in &mut self.survivorTo {
-            if obj.id == gcRef.0 { return obj; }
+            if obj.id == gcRef.0 {
+                return obj;
+            }
         }
         for obj in &mut self.oldGen {
-            if obj.id == gcRef.0 { return obj; }
+            if obj.id == gcRef.0 {
+                return obj;
+            }
         }
         panic!("GcRef({}) not found in any generation", gcRef.0);
     }
@@ -115,16 +131,24 @@ impl Heap {
     #[allow(dead_code, clippy::manual_find)]
     fn try_find(&self, gcRef: GcRef) -> Option<&GcObject> {
         for obj in &self.youngGen {
-            if obj.id == gcRef.0 { return Some(obj); }
+            if obj.id == gcRef.0 {
+                return Some(obj);
+            }
         }
         for obj in &self.survivorFrom {
-            if obj.id == gcRef.0 { return Some(obj); }
+            if obj.id == gcRef.0 {
+                return Some(obj);
+            }
         }
         for obj in &self.survivorTo {
-            if obj.id == gcRef.0 { return Some(obj); }
+            if obj.id == gcRef.0 {
+                return Some(obj);
+            }
         }
         for obj in &self.oldGen {
-            if obj.id == gcRef.0 { return Some(obj); }
+            if obj.id == gcRef.0 {
+                return Some(obj);
+            }
         }
         None
     }
@@ -132,16 +156,24 @@ impl Heap {
     #[allow(clippy::manual_find)]
     fn try_find_mut(&mut self, gcRef: GcRef) -> Option<&mut GcObject> {
         for obj in &mut self.youngGen {
-            if obj.id == gcRef.0 { return Some(obj); }
+            if obj.id == gcRef.0 {
+                return Some(obj);
+            }
         }
         for obj in &mut self.survivorFrom {
-            if obj.id == gcRef.0 { return Some(obj); }
+            if obj.id == gcRef.0 {
+                return Some(obj);
+            }
         }
         for obj in &mut self.survivorTo {
-            if obj.id == gcRef.0 { return Some(obj); }
+            if obj.id == gcRef.0 {
+                return Some(obj);
+            }
         }
         for obj in &mut self.oldGen {
-            if obj.id == gcRef.0 { return Some(obj); }
+            if obj.id == gcRef.0 {
+                return Some(obj);
+            }
         }
         None
     }
@@ -157,7 +189,9 @@ impl Heap {
 
         while let Some(r) = worklist.pop() {
             if let Some(obj) = self.try_find_mut(r) {
-                if obj.marked { continue; }
+                if obj.marked {
+                    continue;
+                }
                 obj.marked = true;
                 if obj.generation != Generation::Old {
                     worklist.extend(obj.children());
@@ -307,7 +341,9 @@ impl Heap {
 
         while let Some(r) = worklist.pop() {
             if let Some(obj) = self.try_find_mut(r) {
-                if obj.marked { continue; }
+                if obj.marked {
+                    continue;
+                }
                 obj.marked = true;
                 worklist.extend(obj.children());
             }
@@ -331,7 +367,9 @@ impl Heap {
     }
 
     pub fn Lisp2Compact(&mut self, _roots: &[GcRef]) {
-        if self.oldGen.is_empty() { return; }
+        if self.oldGen.is_empty() {
+            return;
+        }
 
         self.forwardingTable.clear();
 
@@ -342,8 +380,10 @@ impl Heap {
             if old_gen[read_idx].marked {
                 if write_idx != read_idx {
                     let (left, right) = old_gen.split_at_mut(read_idx);
-                    let moved = std::mem::replace(&mut left[write_idx], std::mem::take(&mut right[0]));
-                    self.forwardingTable.insert(moved.id, GcRef(left[write_idx].id));
+                    let moved =
+                        std::mem::replace(&mut left[write_idx], std::mem::take(&mut right[0]));
+                    self.forwardingTable
+                        .insert(moved.id, GcRef(left[write_idx].id));
                 }
                 write_idx += 1;
             }
@@ -410,9 +450,15 @@ impl Heap {
         self.oldGen.len()
     }
 
-    pub fn MinorGcCount(&self) -> u64 { self.minorGcCount }
-    pub fn MajorGcCount(&self) -> u64 { self.majorGcCount }
-    pub fn AllocCount(&self) -> usize { self.allocCount }
+    pub fn MinorGcCount(&self) -> u64 {
+        self.minorGcCount
+    }
+    pub fn MajorGcCount(&self) -> u64 {
+        self.majorGcCount
+    }
+    pub fn AllocCount(&self) -> usize {
+        self.allocCount
+    }
 
     pub fn GetCardTable(&self) -> &CardTable {
         &self.cardTable

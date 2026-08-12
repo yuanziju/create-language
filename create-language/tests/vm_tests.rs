@@ -5,7 +5,11 @@ use create_language::constant_pool::Value as CpValue;
 use create_language::instruction::Instruction;
 use create_language::opcode::Opcode;
 use create_language::vm::error::{ErrorKind, RuntimeError};
+use create_language::vm::executor_backend::DeoptContext;
+use create_language::vm::jit::cache::MONOMORPHIC_THRESHOLD;
+use create_language::vm::jit::{C0Stub, C2IDeoptimizer, InlineCache};
 use create_language::vm::memory::{CompilationTier, GcObject, Heap};
+use create_language::vm::value::{CallFrame, RuntimeValue, ValueTag};
 use create_language::vm::{Value, Vm};
 
 fn make_module(
@@ -71,61 +75,91 @@ fn test_halt() {
 
 #[test]
 fn test_loadi() {
-    let module = make_module(0, 1, vec![
-        Instruction::ri(Opcode::Loadi, 0, 42),
-        Instruction::rrr(Opcode::Return, 0, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        1,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 42),
+            Instruction::rrr(Opcode::Return, 0, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(42));
 }
 
 #[test]
 fn test_loadk() {
-    let module = make_module(0, 1, vec![
-        Instruction::rrk(Opcode::Loadk, 0, 0, 0),
-        Instruction::rrr(Opcode::Return, 0, 0, 0),
-    ], vec![CpValue::Int(100)]);
+    let module = make_module(
+        0,
+        1,
+        vec![
+            Instruction::rrk(Opcode::Loadk, 0, 0, 0),
+            Instruction::rrr(Opcode::Return, 0, 0, 0),
+        ],
+        vec![CpValue::Int(100)],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(100));
 }
 
 #[test]
 fn test_loadbool_true() {
-    let module = make_module(0, 1, vec![
-        Instruction::rri(Opcode::Loadbool, 0, 0, 1),
-        Instruction::rrr(Opcode::Return, 0, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        1,
+        vec![
+            Instruction::rri(Opcode::Loadbool, 0, 0, 1),
+            Instruction::rrr(Opcode::Return, 0, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Bool(true));
 }
 
 #[test]
 fn test_loadbool_false() {
-    let module = make_module(0, 1, vec![
-        Instruction::rri(Opcode::Loadbool, 0, 0, 0),
-        Instruction::rrr(Opcode::Return, 0, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        1,
+        vec![
+            Instruction::rri(Opcode::Loadbool, 0, 0, 0),
+            Instruction::rrr(Opcode::Return, 0, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Bool(false));
 }
 
 #[test]
 fn test_loadnil() {
-    let module = make_module(0, 1, vec![
-        Instruction::rrk(Opcode::Loadnil, 0, 0, 0),
-        Instruction::rrr(Opcode::Return, 0, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        1,
+        vec![
+            Instruction::rrk(Opcode::Loadnil, 0, 0, 0),
+            Instruction::rrr(Opcode::Return, 0, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::NIL.clone());
 }
 
 #[test]
 fn test_mov() {
-    let module = make_module(0, 2, vec![
-        Instruction::ri(Opcode::Loadi, 0, 42),
-        Instruction::rrr(Opcode::Mov, 1, 0, 0),
-        Instruction::rrr(Opcode::Return, 1, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        2,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 42),
+            Instruction::rrr(Opcode::Mov, 1, 0, 0),
+            Instruction::rrr(Opcode::Return, 1, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(42));
 }
@@ -134,83 +168,118 @@ fn test_mov() {
 
 #[test]
 fn test_add() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 10),
-        Instruction::ri(Opcode::Loadi, 1, 20),
-        Instruction::rrr(Opcode::Add, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 10),
+            Instruction::ri(Opcode::Loadi, 1, 20),
+            Instruction::rrr(Opcode::Add, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(30));
 }
 
 #[test]
 fn test_sub() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 50),
-        Instruction::ri(Opcode::Loadi, 1, 30),
-        Instruction::rrr(Opcode::Sub, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 50),
+            Instruction::ri(Opcode::Loadi, 1, 30),
+            Instruction::rrr(Opcode::Sub, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(20));
 }
 
 #[test]
 fn test_mul() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 7),
-        Instruction::ri(Opcode::Loadi, 1, 6),
-        Instruction::rrr(Opcode::Mul, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 7),
+            Instruction::ri(Opcode::Loadi, 1, 6),
+            Instruction::rrr(Opcode::Mul, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(42));
 }
 
 #[test]
 fn test_div() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 100),
-        Instruction::ri(Opcode::Loadi, 1, 3),
-        Instruction::rrr(Opcode::Div, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 100),
+            Instruction::ri(Opcode::Loadi, 1, 3),
+            Instruction::rrr(Opcode::Div, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(33));
 }
 
 #[test]
 fn test_mod() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 100),
-        Instruction::ri(Opcode::Loadi, 1, 30),
-        Instruction::rrr(Opcode::Mod, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 100),
+            Instruction::ri(Opcode::Loadi, 1, 30),
+            Instruction::rrr(Opcode::Mod, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(10));
 }
 
 #[test]
 fn test_neg() {
-    let module = make_module(0, 2, vec![
-        Instruction::ri(Opcode::Loadi, 0, 42),
-        Instruction::rrr(Opcode::Neg, 1, 0, 0),
-        Instruction::rrr(Opcode::Return, 1, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        2,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 42),
+            Instruction::rrr(Opcode::Neg, 1, 0, 0),
+            Instruction::rrr(Opcode::Return, 1, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(-42));
 }
 
 #[test]
 fn test_division_by_zero() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 10),
-        Instruction::ri(Opcode::Loadi, 1, 0),
-        Instruction::rrr(Opcode::Div, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 10),
+            Instruction::ri(Opcode::Loadi, 1, 0),
+            Instruction::rrr(Opcode::Div, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = run_module(module);
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -219,12 +288,17 @@ fn test_division_by_zero() {
 
 #[test]
 fn test_mod_by_zero() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 10),
-        Instruction::ri(Opcode::Loadi, 1, 0),
-        Instruction::rrr(Opcode::Mod, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 10),
+            Instruction::ri(Opcode::Loadi, 1, 0),
+            Instruction::rrr(Opcode::Mod, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = run_module(module);
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -235,71 +309,101 @@ fn test_mod_by_zero() {
 
 #[test]
 fn test_bit_and() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 6),
-        Instruction::ri(Opcode::Loadi, 1, 3),
-        Instruction::rrr(Opcode::BitAnd, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 6),
+            Instruction::ri(Opcode::Loadi, 1, 3),
+            Instruction::rrr(Opcode::BitAnd, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(2));
 }
 
 #[test]
 fn test_bit_or() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 6),
-        Instruction::ri(Opcode::Loadi, 1, 3),
-        Instruction::rrr(Opcode::BitOr, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 6),
+            Instruction::ri(Opcode::Loadi, 1, 3),
+            Instruction::rrr(Opcode::BitOr, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(7));
 }
 
 #[test]
 fn test_bit_xor() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 6),
-        Instruction::ri(Opcode::Loadi, 1, 3),
-        Instruction::rrr(Opcode::BitXor, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 6),
+            Instruction::ri(Opcode::Loadi, 1, 3),
+            Instruction::rrr(Opcode::BitXor, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(5));
 }
 
 #[test]
 fn test_bit_not() {
-    let module = make_module(0, 2, vec![
-        Instruction::ri(Opcode::Loadi, 0, 42),
-        Instruction::rrr(Opcode::BitNot, 1, 0, 0),
-        Instruction::rrr(Opcode::Return, 1, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        2,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 42),
+            Instruction::rrr(Opcode::BitNot, 1, 0, 0),
+            Instruction::rrr(Opcode::Return, 1, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(!42));
 }
 
 #[test]
 fn test_shl() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 1),
-        Instruction::ri(Opcode::Loadi, 1, 4),
-        Instruction::rrr(Opcode::Shl, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 1),
+            Instruction::ri(Opcode::Loadi, 1, 4),
+            Instruction::rrr(Opcode::Shl, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(16));
 }
 
 #[test]
 fn test_shr() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 16),
-        Instruction::ri(Opcode::Loadi, 1, 2),
-        Instruction::rrr(Opcode::Shr, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 16),
+            Instruction::ri(Opcode::Loadi, 1, 2),
+            Instruction::rrr(Opcode::Shr, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(4));
 }
@@ -308,22 +412,32 @@ fn test_shr() {
 
 #[test]
 fn test_i2f() {
-    let module = make_module(0, 2, vec![
-        Instruction::ri(Opcode::Loadi, 0, 42),
-        Instruction::rrr(Opcode::I2f, 1, 0, 0),
-        Instruction::rrr(Opcode::Return, 1, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        2,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 42),
+            Instruction::rrr(Opcode::I2f, 1, 0, 0),
+            Instruction::rrr(Opcode::Return, 1, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Float(42.0));
 }
 
 #[test]
 fn test_f2i() {
-    let module = make_module(0, 2, vec![
-        Instruction::rrk(Opcode::Loadk, 0, 0, 0),
-        Instruction::rrr(Opcode::F2i, 1, 0, 0),
-        Instruction::rrr(Opcode::Return, 1, 0, 0),
-    ], vec![CpValue::Float(3.14)]);
+    let module = make_module(
+        0,
+        2,
+        vec![
+            Instruction::rrk(Opcode::Loadk, 0, 0, 0),
+            Instruction::rrr(Opcode::F2i, 1, 0, 0),
+            Instruction::rrr(Opcode::Return, 1, 0, 0),
+        ],
+        vec![CpValue::Float(3.14)],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(3));
 }
@@ -332,71 +446,101 @@ fn test_f2i() {
 
 #[test]
 fn test_eq_true() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 10),
-        Instruction::ri(Opcode::Loadi, 1, 10),
-        Instruction::rrr(Opcode::Eq, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 10),
+            Instruction::ri(Opcode::Loadi, 1, 10),
+            Instruction::rrr(Opcode::Eq, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Bool(true));
 }
 
 #[test]
 fn test_eq_false() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 10),
-        Instruction::ri(Opcode::Loadi, 1, 20),
-        Instruction::rrr(Opcode::Eq, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 10),
+            Instruction::ri(Opcode::Loadi, 1, 20),
+            Instruction::rrr(Opcode::Eq, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Bool(false));
 }
 
 #[test]
 fn test_lt_true() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 5),
-        Instruction::ri(Opcode::Loadi, 1, 10),
-        Instruction::rrr(Opcode::Lt, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 5),
+            Instruction::ri(Opcode::Loadi, 1, 10),
+            Instruction::rrr(Opcode::Lt, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Bool(true));
 }
 
 #[test]
 fn test_lt_false() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 10),
-        Instruction::ri(Opcode::Loadi, 1, 5),
-        Instruction::rrr(Opcode::Lt, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 10),
+            Instruction::ri(Opcode::Loadi, 1, 5),
+            Instruction::rrr(Opcode::Lt, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Bool(false));
 }
 
 #[test]
 fn test_le_true() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 10),
-        Instruction::ri(Opcode::Loadi, 1, 10),
-        Instruction::rrr(Opcode::Le, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 10),
+            Instruction::ri(Opcode::Loadi, 1, 10),
+            Instruction::rrr(Opcode::Le, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Bool(true));
 }
 
 #[test]
 fn test_not() {
-    let module = make_module(0, 2, vec![
-        Instruction::rri(Opcode::Loadbool, 0, 0, 0),
-        Instruction::rrr(Opcode::Not, 1, 0, 0),
-        Instruction::rrr(Opcode::Return, 1, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        2,
+        vec![
+            Instruction::rri(Opcode::Loadbool, 0, 0, 0),
+            Instruction::rrr(Opcode::Not, 1, 0, 0),
+            Instruction::rrr(Opcode::Return, 1, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Bool(true));
 }
@@ -405,33 +549,48 @@ fn test_not() {
 
 #[test]
 fn test_istype_int() {
-    let module = make_module(0, 2, vec![
-        Instruction::ri(Opcode::Loadi, 0, 42),
-        Instruction::rri(Opcode::IsType, 1, 0, 2),
-        Instruction::rrr(Opcode::Return, 1, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        2,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 42),
+            Instruction::rri(Opcode::IsType, 1, 0, 2),
+            Instruction::rrr(Opcode::Return, 1, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Bool(true));
 }
 
 #[test]
 fn test_istype_nil() {
-    let module = make_module(0, 2, vec![
-        Instruction::rrk(Opcode::Loadnil, 0, 0, 0),
-        Instruction::rri(Opcode::IsType, 1, 0, 0),
-        Instruction::rrr(Opcode::Return, 1, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        2,
+        vec![
+            Instruction::rrk(Opcode::Loadnil, 0, 0, 0),
+            Instruction::rri(Opcode::IsType, 1, 0, 0),
+            Instruction::rrr(Opcode::Return, 1, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Bool(true));
 }
 
 #[test]
 fn test_istype_bool() {
-    let module = make_module(0, 2, vec![
-        Instruction::rri(Opcode::Loadbool, 0, 0, 1),
-        Instruction::rri(Opcode::IsType, 1, 0, 1),
-        Instruction::rrr(Opcode::Return, 1, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        2,
+        vec![
+            Instruction::rri(Opcode::Loadbool, 0, 0, 1),
+            Instruction::rri(Opcode::IsType, 1, 0, 1),
+            Instruction::rrr(Opcode::Return, 1, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Bool(true));
 }
@@ -440,52 +599,72 @@ fn test_istype_bool() {
 
 #[test]
 fn test_jmp() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 1),
-        Instruction::from_raw(Opcode::Jmp as u32 | (0 << 8) | (2 << 16)),
-        Instruction::ri(Opcode::Loadi, 1, 99),
-        Instruction::ri(Opcode::Loadi, 1, 42),
-        Instruction::rrr(Opcode::Return, 1, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 1),
+            Instruction::from_raw(Opcode::Jmp as u32 | (0 << 8) | (2 << 16)),
+            Instruction::ri(Opcode::Loadi, 1, 99),
+            Instruction::ri(Opcode::Loadi, 1, 42),
+            Instruction::rrr(Opcode::Return, 1, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(42));
 }
 
 #[test]
 fn test_jmpt_true() {
-    let module = make_module(0, 3, vec![
-        Instruction::rri(Opcode::Loadbool, 2, 0, 1),
-        Instruction::from_raw(Opcode::JmpT as u32 | (2 << 8) | (2 << 16)),
-        Instruction::ri(Opcode::Loadi, 1, 99),
-        Instruction::ri(Opcode::Loadi, 1, 42),
-        Instruction::rrr(Opcode::Return, 1, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::rri(Opcode::Loadbool, 2, 0, 1),
+            Instruction::from_raw(Opcode::JmpT as u32 | (2 << 8) | (2 << 16)),
+            Instruction::ri(Opcode::Loadi, 1, 99),
+            Instruction::ri(Opcode::Loadi, 1, 42),
+            Instruction::rrr(Opcode::Return, 1, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(42));
 }
 
 #[test]
 fn test_jmpt_false() {
-    let module = make_module(0, 3, vec![
-        Instruction::rri(Opcode::Loadbool, 2, 0, 0),
-        Instruction::from_raw(Opcode::JmpT as u32 | (2 << 8) | (2 << 16)),
-        Instruction::ri(Opcode::Loadi, 1, 99),
-        Instruction::ri(Opcode::Loadi, 2, 42),
-        Instruction::rrr(Opcode::Return, 1, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::rri(Opcode::Loadbool, 2, 0, 0),
+            Instruction::from_raw(Opcode::JmpT as u32 | (2 << 8) | (2 << 16)),
+            Instruction::ri(Opcode::Loadi, 1, 99),
+            Instruction::ri(Opcode::Loadi, 2, 42),
+            Instruction::rrr(Opcode::Return, 1, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(99));
 }
 
 #[test]
 fn test_jmpf_false() {
-    let module = make_module(0, 3, vec![
-        Instruction::rri(Opcode::Loadbool, 2, 0, 0),
-        Instruction::from_raw(Opcode::JmpF as u32 | (2 << 8) | (2 << 16)),
-        Instruction::ri(Opcode::Loadi, 1, 99),
-        Instruction::ri(Opcode::Loadi, 1, 42),
-        Instruction::rrr(Opcode::Return, 1, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::rri(Opcode::Loadbool, 2, 0, 0),
+            Instruction::from_raw(Opcode::JmpF as u32 | (2 << 8) | (2 << 16)),
+            Instruction::ri(Opcode::Loadi, 1, 99),
+            Instruction::ri(Opcode::Loadi, 1, 42),
+            Instruction::rrr(Opcode::Return, 1, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(42));
 }
@@ -576,10 +755,15 @@ fn test_tail_call() {
 
 #[test]
 fn test_string_load() {
-    let module = make_module(0, 1, vec![
-        Instruction::rrk(Opcode::Loadk, 0, 0, 0),
-        Instruction::rrr(Opcode::Return, 0, 0, 0),
-    ], vec![CpValue::String("hello".into())]);
+    let module = make_module(
+        0,
+        1,
+        vec![
+            Instruction::rrk(Opcode::Loadk, 0, 0, 0),
+            Instruction::rrr(Opcode::Return, 0, 0, 0),
+        ],
+        vec![CpValue::String("hello".into())],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Str("hello".into()));
 }
@@ -588,20 +772,30 @@ fn test_string_load() {
 
 #[test]
 fn test_new_object() {
-    let module = make_module(0, 1, vec![
-        Instruction::rrk(Opcode::NewObject, 0, 0, 0),
-        Instruction::rrr(Opcode::Return, 0, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        1,
+        vec![
+            Instruction::rrk(Opcode::NewObject, 0, 0, 0),
+            Instruction::rrr(Opcode::Return, 0, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert!(is_object(&result), "expected Object, got {:?}", result);
 }
 
 #[test]
 fn test_new_array() {
-    let module = make_module(0, 1, vec![
-        Instruction::rrk(Opcode::NewArray, 0, 0, 0),
-        Instruction::rrr(Opcode::Return, 0, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        1,
+        vec![
+            Instruction::rrk(Opcode::NewArray, 0, 0, 0),
+            Instruction::rrr(Opcode::Return, 0, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert!(is_array(&result), "expected Array, got {:?}", result);
 }
@@ -705,12 +899,17 @@ fn test_set_get_field() {
 
 #[test]
 fn test_type_mismatch_on_add() {
-    let module = make_module(0, 3, vec![
-        Instruction::ri(Opcode::Loadi, 0, 10),
-        Instruction::rri(Opcode::Loadbool, 1, 0, 1),
-        Instruction::rrr(Opcode::Add, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 10),
+            Instruction::rri(Opcode::Loadbool, 1, 0, 1),
+            Instruction::rrr(Opcode::Add, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![],
+    );
     let result = run_module(module);
     assert!(result.is_err());
 }
@@ -788,7 +987,10 @@ fn test_gc_promotes_to_old() {
         }
     }
 
-    assert!(heap.OldGenSize() > 0, "object should be promoted to old gen after 16 minor GCs");
+    assert!(
+        heap.OldGenSize() > 0,
+        "object should be promoted to old gen after 16 minor GCs"
+    );
 }
 
 #[test]
@@ -805,7 +1007,11 @@ fn test_gc_lisp2_compact() {
 
     heap.MajorGc(&[r1, r3, r5]);
 
-    assert_eq!(heap.OldGenSize(), 3, "Lisp2 compact should retain only live objects");
+    assert_eq!(
+        heap.OldGenSize(),
+        3,
+        "Lisp2 compact should retain only live objects"
+    );
     assert!(heap.MajorGcCount() >= 1);
 }
 
@@ -819,14 +1025,20 @@ fn test_write_barrier_marks_card() {
     heap.WriteBarrier(old_obj, young_obj);
 
     let dirty = heap.GetCardTable().DirtyCards();
-    assert!(!dirty.is_empty(), "card table should have dirty cards after write barrier");
+    assert!(
+        !dirty.is_empty(),
+        "card table should have dirty cards after write barrier"
+    );
 
     let expected_idx = young_obj.0 % heap.GetCardTable().Len();
     assert!(dirty.contains(&expected_idx));
 
     heap.GetCardTableMut().Clear();
     let dirty_after_clear = heap.GetCardTable().DirtyCards();
-    assert!(dirty_after_clear.is_empty(), "card table should be empty after clear");
+    assert!(
+        dirty_after_clear.is_empty(),
+        "card table should be empty after clear"
+    );
 }
 
 // ---- Tiered JIT ----
@@ -834,27 +1046,27 @@ fn test_write_barrier_marks_card() {
 #[test]
 fn test_jit_default_tier() {
     let vm = Vm::new();
-    let tier = vm.jit.GetTier(0);
+    let tier = vm.executor.jit.GetTier(0);
     assert_eq!(tier, CompilationTier::Interpreter);
 }
 
 #[test]
 fn test_jit_compile() {
     let mut vm = Vm::new();
-    vm.jit.enabled = true;
-    let tier = vm.jit.Compile(0, &[]);
+    vm.executor.jit.enabled = true;
+    let tier = vm.executor.jit.Compile(0, &[]);
     assert_eq!(tier, CompilationTier::OptimizingJit);
-    assert_eq!(vm.jit.compileCount, 1);
-    assert_eq!(vm.jit.CodeCacheStats().optimizedCount, 1);
+    assert_eq!(vm.executor.jit.compile_count, 1);
+    assert_eq!(vm.executor.jit.CodeCacheStats().optimized_count, 1);
 }
 
 #[test]
 fn test_jit_deoptimize() {
     let mut vm = Vm::new();
-    vm.jit.enabled = true;
-    vm.jit.Compile(0, &[]);
-    vm.jit.Deoptimize(0);
-    assert_eq!(vm.jit.GetTier(0), CompilationTier::BaselineJit);
+    vm.executor.jit.enabled = true;
+    vm.executor.jit.Compile(0, &[]);
+    vm.executor.jit.Deoptimize(0);
+    assert_eq!(vm.executor.jit.GetTier(0), CompilationTier::BaselineJit);
 }
 
 // ---- Native function ----
@@ -900,7 +1112,10 @@ fn test_closure_upvalue() {
                 ],
                 constants: vec![],
                 upvalueCount: 1,
-                upvalueDescs: vec![UpvalueDesc { isLocal: true, index: 0 }],
+                upvalueDescs: vec![UpvalueDesc {
+                    isLocal: true,
+                    index: 0,
+                }],
             },
         ],
         exports: vec![],
@@ -915,59 +1130,84 @@ fn test_closure_upvalue() {
 
 #[test]
 fn test_float_add() {
-    let module = make_module(0, 3, vec![
-        Instruction::rrk(Opcode::Loadk, 0, 0, 0),
-        Instruction::rrk(Opcode::Loadk, 1, 0, 1),
-        Instruction::rrr(Opcode::Add, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![CpValue::Float(1.5), CpValue::Float(2.5)]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::rrk(Opcode::Loadk, 0, 0, 0),
+            Instruction::rrk(Opcode::Loadk, 1, 0, 1),
+            Instruction::rrr(Opcode::Add, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![CpValue::Float(1.5), CpValue::Float(2.5)],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Float(4.0));
 }
 
 #[test]
 fn test_float_sub() {
-    let module = make_module(0, 3, vec![
-        Instruction::rrk(Opcode::Loadk, 0, 0, 0),
-        Instruction::rrk(Opcode::Loadk, 1, 0, 1),
-        Instruction::rrr(Opcode::Sub, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![CpValue::Float(5.5), CpValue::Float(2.0)]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::rrk(Opcode::Loadk, 0, 0, 0),
+            Instruction::rrk(Opcode::Loadk, 1, 0, 1),
+            Instruction::rrr(Opcode::Sub, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![CpValue::Float(5.5), CpValue::Float(2.0)],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Float(3.5));
 }
 
 #[test]
 fn test_float_mul() {
-    let module = make_module(0, 3, vec![
-        Instruction::rrk(Opcode::Loadk, 0, 0, 0),
-        Instruction::rrk(Opcode::Loadk, 1, 0, 1),
-        Instruction::rrr(Opcode::Mul, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![CpValue::Float(3.0), CpValue::Float(1.5)]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::rrk(Opcode::Loadk, 0, 0, 0),
+            Instruction::rrk(Opcode::Loadk, 1, 0, 1),
+            Instruction::rrr(Opcode::Mul, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![CpValue::Float(3.0), CpValue::Float(1.5)],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Float(4.5));
 }
 
 #[test]
 fn test_float_div() {
-    let module = make_module(0, 3, vec![
-        Instruction::rrk(Opcode::Loadk, 0, 0, 0),
-        Instruction::rrk(Opcode::Loadk, 1, 0, 1),
-        Instruction::rrr(Opcode::Div, 2, 0, 1),
-        Instruction::rrr(Opcode::Return, 2, 0, 0),
-    ], vec![CpValue::Float(10.0), CpValue::Float(3.0)]);
+    let module = make_module(
+        0,
+        3,
+        vec![
+            Instruction::rrk(Opcode::Loadk, 0, 0, 0),
+            Instruction::rrk(Opcode::Loadk, 1, 0, 1),
+            Instruction::rrr(Opcode::Div, 2, 0, 1),
+            Instruction::rrr(Opcode::Return, 2, 0, 0),
+        ],
+        vec![CpValue::Float(10.0), CpValue::Float(3.0)],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Float(10.0 / 3.0));
 }
 
 #[test]
 fn test_float_neg() {
-    let module = make_module(0, 2, vec![
-        Instruction::rrk(Opcode::Loadk, 0, 0, 0),
-        Instruction::rrr(Opcode::Neg, 1, 0, 0),
-        Instruction::rrr(Opcode::Return, 1, 0, 0),
-    ], vec![CpValue::Float(3.14)]);
+    let module = make_module(
+        0,
+        2,
+        vec![
+            Instruction::rrk(Opcode::Loadk, 0, 0, 0),
+            Instruction::rrr(Opcode::Neg, 1, 0, 0),
+            Instruction::rrr(Opcode::Return, 1, 0, 0),
+        ],
+        vec![CpValue::Float(3.14)],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Float(-3.14));
 }
@@ -976,11 +1216,16 @@ fn test_float_neg() {
 
 #[test]
 fn test_close_upvalue() {
-    let module = make_module(0, 2, vec![
-        Instruction::ri(Opcode::Loadi, 0, 42),
-        Instruction::rrk(Opcode::CloseUpvalue, 0, 0, 0),
-        Instruction::rrr(Opcode::Return, 0, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        2,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 42),
+            Instruction::rrk(Opcode::CloseUpvalue, 0, 0, 0),
+            Instruction::rrr(Opcode::Return, 0, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Int(42));
 }
@@ -989,22 +1234,32 @@ fn test_close_upvalue() {
 
 #[test]
 fn test_nil_is_falsy() {
-    let module = make_module(0, 2, vec![
-        Instruction::rrk(Opcode::Loadnil, 0, 0, 0),
-        Instruction::rrr(Opcode::Not, 1, 0, 0),
-        Instruction::rrr(Opcode::Return, 1, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        2,
+        vec![
+            Instruction::rrk(Opcode::Loadnil, 0, 0, 0),
+            Instruction::rrr(Opcode::Not, 1, 0, 0),
+            Instruction::rrr(Opcode::Return, 1, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Bool(true));
 }
 
 #[test]
 fn test_zero_is_truthy() {
-    let module = make_module(0, 2, vec![
-        Instruction::ri(Opcode::Loadi, 0, 0),
-        Instruction::rrr(Opcode::Not, 1, 0, 0),
-        Instruction::rrr(Opcode::Return, 1, 0, 0),
-    ], vec![]);
+    let module = make_module(
+        0,
+        2,
+        vec![
+            Instruction::ri(Opcode::Loadi, 0, 0),
+            Instruction::rrr(Opcode::Not, 1, 0, 0),
+            Instruction::rrr(Opcode::Return, 1, 0, 0),
+        ],
+        vec![],
+    );
     let result = exec_func(module, 0, vec![]).unwrap();
     assert_eq!(result, Value::Bool(false));
 }
@@ -1043,7 +1298,10 @@ fn test_store_upvalue() {
                 ],
                 constants: vec![],
                 upvalueCount: 1,
-                upvalueDescs: vec![UpvalueDesc { isLocal: true, index: 0 }],
+                upvalueDescs: vec![UpvalueDesc {
+                    isLocal: true,
+                    index: 0,
+                }],
             },
         ],
         exports: vec![],
@@ -1052,4 +1310,166 @@ fn test_store_upvalue() {
     };
     let result = exec_func(module, 0, vec![]).unwrap();
     assert!(is_closure(&result), "expected Closure, got {:?}", result);
+}
+
+// ---- Tiered JIT: Inline Cache ----
+
+#[test]
+fn test_ic_monomorphic_hit() {
+    let mut ic = InlineCache::new();
+    assert!(!ic.is_monomorphic());
+
+    for _ in 0..MONOMORPHIC_THRESHOLD {
+        ic.update(42, ValueTag::Int);
+    }
+
+    assert!(ic.is_monomorphic());
+    assert!(!ic.is_megamorphic());
+    assert_eq!(ic.hit_count, MONOMORPHIC_THRESHOLD);
+    assert_eq!(ic.cached_target, Some(42));
+    assert_eq!(ic.cached_type, Some(ValueTag::Int));
+
+    ic.update(42, ValueTag::Int);
+    assert!(ic.is_monomorphic(), "same target should stay monomorphic");
+    assert_eq!(ic.hit_count, MONOMORPHIC_THRESHOLD + 1);
+}
+
+#[test]
+fn test_ic_megamorphic_miss() {
+    let mut ic = InlineCache::new();
+
+    for _ in 0..MONOMORPHIC_THRESHOLD {
+        ic.update(10, ValueTag::Int);
+    }
+    assert!(ic.is_monomorphic());
+
+    ic.update(20, ValueTag::Int);
+    assert!(
+        ic.is_megamorphic(),
+        "different target should trigger megamorphic"
+    );
+    assert!(!ic.is_monomorphic());
+    assert!(ic.cached_target.is_none());
+    assert!(ic.cached_type.is_none());
+    assert_eq!(ic.miss_count, 1);
+    assert_eq!(ic.deopt_count, 1);
+
+    ic.update(30, ValueTag::Float);
+    ic.update(40, ValueTag::Str);
+    assert!(ic.is_megamorphic());
+    assert_eq!(ic.miss_count, 3);
+}
+
+// ---- Tiered JIT: C0 Stub ----
+
+#[test]
+fn test_c0_stub_skips_dispatch() {
+    let dispatch_table = create_language::vm::executor::DispatchTable::new();
+    let instructions = vec![
+        Instruction::ri(Opcode::Loadi, 0, 42),
+        Instruction::ri(Opcode::Loadi, 1, 10),
+        Instruction::rrr(Opcode::Add, 0, 0, 1),
+        Instruction::rrr(Opcode::Return, 0, 0, 0),
+    ];
+
+    let stub = C0Stub::new(0, instructions.clone(), &dispatch_table);
+
+    assert_eq!(stub.func_index, 0);
+    assert_eq!(stub.instructions.len(), 4);
+    assert_eq!(
+        stub.handlers.len(),
+        4,
+        "handlers should match instructions count"
+    );
+    assert!(!stub.handlers.is_empty());
+}
+
+// ---- Tiered JIT: C2I Deoptimization ----
+
+#[test]
+fn test_c2i_deopt_rebuilds_frame() {
+    let mut frame = CallFrame {
+        funcIndex: 5,
+        ip: 100,
+        registers: vec![RuntimeValue::Int(99)],
+        tier: CompilationTier::OptimizingJit,
+        ..Default::default()
+    };
+
+    let snapshot_registers = vec![RuntimeValue::Int(42), RuntimeValue::Float(3.14)];
+
+    let ctx = DeoptContext {
+        from_tier: CompilationTier::OptimizingJit,
+        to_tier: CompilationTier::BaselineJit,
+        snapshot_registers: snapshot_registers.clone(),
+        snapshot_ip: 55,
+        func_index: 5,
+    };
+
+    let deoptimizer = C2IDeoptimizer::new();
+    deoptimizer.rebuild_frame(&mut frame, &ctx);
+
+    assert_eq!(frame.funcIndex, 5);
+    assert_eq!(frame.ip, 55, "IP should be restored to snapshot_ip");
+    assert_eq!(
+        frame.registers, snapshot_registers,
+        "registers should be restored"
+    );
+    assert_eq!(
+        frame.tier,
+        CompilationTier::BaselineJit,
+        "tier should be downgraded"
+    );
+
+    assert!(
+        C2IDeoptimizer::should_deopt_from_tier(CompilationTier::BaselineJit),
+        "BaselineJit should be deoptimizable"
+    );
+    assert!(
+        C2IDeoptimizer::should_deopt_from_tier(CompilationTier::OptimizingJit),
+        "OptimizingJit should be deoptimizable"
+    );
+    assert!(
+        !C2IDeoptimizer::should_deopt_from_tier(CompilationTier::Interpreter),
+        "Interpreter should not need deoptimization"
+    );
+}
+
+// ---- Tiered JIT: Tier Promotion ----
+
+#[test]
+fn test_tier_promotion_triggers_c0() {
+    let mut vm = Vm::new();
+    vm.executor.jit.enabled = true;
+
+    assert_eq!(vm.executor.jit.GetTier(0), CompilationTier::Interpreter);
+
+    for i in 0..10 {
+        vm.executor.jit.IncrementCallCounter(0);
+        let count = vm.executor.jit.GetCallCount(0);
+        assert_eq!(count, i + 1);
+    }
+
+    let tier = vm.executor.jit.Compile(0, &[]);
+    assert_eq!(
+        tier,
+        CompilationTier::OptimizingJit,
+        "should compile after threshold"
+    );
+    assert_eq!(vm.executor.jit.GetTier(0), CompilationTier::OptimizingJit);
+    assert_eq!(vm.executor.jit.compile_count, 1);
+
+    vm.executor.jit.Deoptimize(0);
+    assert_eq!(
+        vm.executor.jit.GetTier(0),
+        CompilationTier::BaselineJit,
+        "first deopt should go to BaselineJit"
+    );
+
+    vm.executor.jit.Deoptimize(0);
+    assert_eq!(
+        vm.executor.jit.GetTier(0),
+        CompilationTier::Interpreter,
+        "second deopt should go to Interpreter"
+    );
 }

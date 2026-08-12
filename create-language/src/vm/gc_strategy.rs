@@ -1,5 +1,5 @@
-use super::value::{GcRef, ObjectKind, CallFrame, RuntimeValue};
 use super::heap::CardTable;
+use super::value::{CallFrame, GcRef, ObjectKind, RuntimeValue};
 
 pub trait GcStrategy {
     fn Alloc(&mut self, kind: ObjectKind) -> GcRef;

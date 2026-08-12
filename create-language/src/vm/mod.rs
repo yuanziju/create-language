@@ -1,23 +1,21 @@
 pub mod error;
-pub mod value;
-pub mod heap;
-pub mod memory;
 pub mod executor;
-pub mod jit;
-pub mod gc_strategy;
 pub mod executor_backend;
+pub mod gc_strategy;
+pub mod heap;
+pub mod jit;
+pub mod memory;
+pub mod value;
 
-use crate::binary::ModuleFile;
 use self::error::*;
 use self::executor::Executor;
-use self::jit::JitContext;
 use self::memory::RuntimeValue;
+use crate::binary::ModuleFile;
 
 pub use self::memory::RuntimeValue as Value;
 
 pub struct Vm {
     pub executor: Executor,
-    pub jit: JitContext,
 }
 
 impl Default for Vm {
@@ -30,9 +28,10 @@ impl Vm {
     pub fn new() -> Self {
         let mut vm = Vm {
             executor: Executor::new(),
-            jit: JitContext::new(),
         };
-        vm.jit.InitDispatchTable(&mut vm.executor.dispatchTable);
+        vm.executor
+            .jit
+            .InitDispatchTable(&mut vm.executor.dispatchTable);
         vm
     }
 
