@@ -6,6 +6,8 @@ use crate::opcode::Opcode;
 use super::error::*;
 use super::memory::*;
 
+use super::heap::Heap;
+
 pub type Handler = fn(&mut Executor, Instruction) -> VmResult<()>;
 
 pub struct DispatchTable {
@@ -201,9 +203,20 @@ impl Executor {
         &self.frames[self.currentFuncIndex].registers[idx as usize]
     }
 
+    #[allow(dead_code)]
     fn regMut(&mut self, idx: u8) -> &mut RuntimeValue {
         let frameIdx = self.currentFuncIndex;
         &mut self.frames[frameIdx].registers[idx as usize]
+    }
+
+    fn set_reg(&mut self, idx: u8, val: RuntimeValue) {
+        let frameIdx = self.currentFuncIndex;
+        let frame = &mut self.frames[frameIdx];
+        if (idx as usize) >= frame.registers.len() {
+            frame.registers.resize(idx as usize + 1, RuntimeValue::NIL.clone());
+        }
+        frame.registers[idx as usize] = val;
+        frame.UpdateRegisterBitmap(idx as usize);
     }
 
     fn constant(&self, idx: u16) -> RuntimeValue {
@@ -221,37 +234,91 @@ impl Executor {
         }
     }
 
-    pub fn CollectGarbage(&mut self) {
+    pub fn CollectRoots(&self) -> Vec<GcRef> {
         let mut roots = Vec::new();
         for frame in &self.frames {
-            for reg in &frame.registers {
-                if let Some(r) = reg.as_gc_ref() { roots.push(r); }
-                if let ValuePayload::Closure(ref c) = reg.payload {
-                    for r in &c.upvalues { roots.push(*r); }
+            for (i, reg) in frame.registers.iter().enumerate() {
+                let word = i / 64;
+                let bit = i % 64;
+                if word < frame.registers_bitmap.len() && (frame.registers_bitmap[word] & (1 << bit)) != 0 {
+                    if let Some(r) = reg.as_gc_ref() {
+                        roots.push(r);
+                    }
                 }
+            }
+            for u in &frame.upvalues {
+                roots.push(*u);
             }
         }
         for val in &self.stack {
-            if let Some(r) = val.as_gc_ref() { roots.push(r); }
+            if let Some(r) = val.as_gc_ref() {
+                roots.push(r);
+            }
         }
-        for r in &self.globalRefs { roots.push(*r); }
-
-        for gcRef in &roots {
-            self.mark_root(*gcRef);
+        for r in &self.globalRefs {
+            roots.push(*r);
         }
-
-        self.heap.MinorGc();
+        roots
     }
 
-    fn mark_root(&mut self, gcRef: GcRef) {
-        let mut worklist = vec![gcRef];
-        while let Some(r) = worklist.pop() {
-            if r.0 >= self.heap.YoungGenSize() + self.heap.OldGenSize() { continue; }
-            let obj = self.heap.GetMut(r);
-            if obj.marked { continue; }
-            obj.marked = true;
-            let children = obj.children();
-            worklist.extend(children);
+    pub fn CollectGarbage(&mut self) {
+        let roots = self.CollectRoots();
+
+        self.heap.MajorGc(&roots);
+
+        let ft = self.heap.GetForwardingTable().clone();
+        if !ft.is_empty() {
+            for frame in &mut self.frames {
+                for reg in &mut frame.registers {
+                    Heap::ApplyForwardingToValue(reg, &ft);
+                }
+                for upv in &mut frame.upvalues {
+                    if let Some(newRef) = ft.get(&upv.0) {
+                        *upv = *newRef;
+                    }
+                }
+            }
+            for val in &mut self.stack {
+                Heap::ApplyForwardingToValue(val, &ft);
+            }
+            for r in &mut self.globalRefs {
+                if let Some(newRef) = ft.get(&r.0) {
+                    *r = *newRef;
+                }
+            }
+            for frame in &mut self.frames {
+                frame.RebuildRegisterBitmap();
+            }
+        }
+    }
+
+    pub fn MinorGcNow(&mut self) {
+        let roots = self.CollectRoots();
+        self.heap.MinorGc(&roots);
+
+        let ft = self.heap.GetForwardingTable().clone();
+        if !ft.is_empty() {
+            for frame in &mut self.frames {
+                for reg in &mut frame.registers {
+                    Heap::ApplyForwardingToValue(reg, &ft);
+                }
+                for upv in &mut frame.upvalues {
+                    if let Some(newRef) = ft.get(&upv.0) {
+                        *upv = *newRef;
+                    }
+                }
+            }
+            for val in &mut self.stack {
+                Heap::ApplyForwardingToValue(val, &ft);
+            }
+            for r in &mut self.globalRefs {
+                if let Some(newRef) = ft.get(&r.0) {
+                    *r = *newRef;
+                }
+            }
+            for frame in &mut self.frames {
+                frame.RebuildRegisterBitmap();
+            }
         }
     }
 
@@ -275,7 +342,7 @@ impl Executor {
         } else {
             RuntimeValue::Int(op(bv, cv))
         };
-        *self.regMut(a) = result;
+        self.set_reg(a, result);
         Ok(())
     }
 
@@ -310,7 +377,7 @@ fn handle_mov(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let a = inst.a();
     let b = inst.b();
     let val = exec.reg(b).clone();
-    *exec.regMut(a) = val;
+    exec.set_reg(a, val);
     Ok(())
 }
 
@@ -318,27 +385,27 @@ fn handle_loadk(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let a = inst.a();
     let k = inst.c() as u16;
     let val = exec.constant(k);
-    *exec.regMut(a) = val;
+    exec.set_reg(a, val);
     Ok(())
 }
 
 fn handle_loadi(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let a = inst.a();
     let imm = inst.imm16() as i64;
-    *exec.regMut(a) = RuntimeValue::Int(imm);
+    exec.set_reg(a, RuntimeValue::Int(imm));
     Ok(())
 }
 
 fn handle_loadbool(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let a = inst.a();
     let b = inst.c() != 0;
-    *exec.regMut(a) = RuntimeValue::Bool(b);
+    exec.set_reg(a, RuntimeValue::Bool(b));
     Ok(())
 }
 
 fn handle_loadnil(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let a = inst.a();
-    *exec.regMut(a) = RuntimeValue::NIL.clone();
+    exec.set_reg(a, RuntimeValue::NIL.clone());
     Ok(())
 }
 
@@ -365,19 +432,19 @@ fn handle_div(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
             if *r == 0 {
                 return Err(RuntimeError::new(ErrorKind::DivisionByZero, "division by zero"));
             }
-            *exec.regMut(a) = RuntimeValue::Int(l / r);
+            exec.set_reg(a, RuntimeValue::Int(l / r));
         }
         (ValuePayload::Float(l), ValuePayload::Float(r)) => {
-            *exec.regMut(a) = RuntimeValue::Float(l / r);
+            exec.set_reg(a, RuntimeValue::Float(l / r));
         }
         (ValuePayload::Int(l), ValuePayload::Float(r)) => {
-            *exec.regMut(a) = RuntimeValue::Float(*l as f64 / r);
+            exec.set_reg(a, RuntimeValue::Float(*l as f64 / r));
         }
         (ValuePayload::Float(l), ValuePayload::Int(r)) => {
             if *r == 0 {
                 return Err(RuntimeError::new(ErrorKind::DivisionByZero, "division by zero"));
             }
-            *exec.regMut(a) = RuntimeValue::Float(l / *r as f64);
+            exec.set_reg(a, RuntimeValue::Float(l / *r as f64));
         }
         _ => return Err(RuntimeError::type_error("number", "non-number")),
     }
@@ -395,7 +462,7 @@ fn handle_mod(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
             if *r == 0 {
                 return Err(RuntimeError::new(ErrorKind::DivisionByZero, "modulo by zero"));
             }
-            *exec.regMut(a) = RuntimeValue::Int(l % r);
+            exec.set_reg(a, RuntimeValue::Int(l % r));
             Ok(())
         }
         _ => Err(RuntimeError::type_error("integer", "non-integer")),
@@ -407,8 +474,8 @@ fn handle_neg(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let b = inst.b();
     let val = exec.reg(b).clone();
     match val.payload {
-        ValuePayload::Int(i) => *exec.regMut(a) = RuntimeValue::Int(-i),
-        ValuePayload::Float(f) => *exec.regMut(a) = RuntimeValue::Float(-f),
+        ValuePayload::Int(i) => exec.set_reg(a, RuntimeValue::Int(-i)),
+        ValuePayload::Float(f) => exec.set_reg(a, RuntimeValue::Float(-f)),
         _ => return Err(RuntimeError::type_error("number", "non-number")),
     }
     Ok(())
@@ -431,7 +498,7 @@ fn handle_bit_not(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let b = inst.b();
     let val = exec.reg(b).clone();
     match val.payload {
-        ValuePayload::Int(i) => *exec.regMut(a) = RuntimeValue::Int(!i),
+        ValuePayload::Int(i) => exec.set_reg(a, RuntimeValue::Int(!i)),
         _ => return Err(RuntimeError::type_error("integer", "non-integer")),
     }
     Ok(())
@@ -450,7 +517,7 @@ fn handle_i2f(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let b = inst.b();
     let val = exec.reg(b).clone();
     match val.payload {
-        ValuePayload::Int(i) => *exec.regMut(a) = RuntimeValue::Float(i as f64),
+        ValuePayload::Int(i) => exec.set_reg(a, RuntimeValue::Float(i as f64)),
         _ => return Err(RuntimeError::type_error("integer", "non-integer")),
     }
     Ok(())
@@ -461,7 +528,7 @@ fn handle_f2i(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let b = inst.b();
     let val = exec.reg(b).clone();
     match val.payload {
-        ValuePayload::Float(f) => *exec.regMut(a) = RuntimeValue::Int(f as i64),
+        ValuePayload::Float(f) => exec.set_reg(a, RuntimeValue::Int(f as i64)),
         _ => return Err(RuntimeError::type_error("float", "non-float")),
     }
     Ok(())
@@ -473,7 +540,7 @@ fn handle_eq(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let c = inst.c();
     let bVal = exec.reg(b).clone();
     let cVal = exec.reg(c).clone();
-    *exec.regMut(a) = RuntimeValue::Bool(bVal == cVal);
+    exec.set_reg(a, RuntimeValue::Bool(bVal == cVal));
     Ok(())
 }
 
@@ -490,7 +557,7 @@ fn handle_lt(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
         (ValuePayload::Float(l), ValuePayload::Int(r)) => *l < (*r as f64),
         _ => return Err(RuntimeError::type_error("number", "non-number")),
     };
-    *exec.regMut(a) = RuntimeValue::Bool(result);
+    exec.set_reg(a, RuntimeValue::Bool(result));
     Ok(())
 }
 
@@ -507,7 +574,7 @@ fn handle_le(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
         (ValuePayload::Float(l), ValuePayload::Int(r)) => *l <= (*r as f64),
         _ => return Err(RuntimeError::type_error("number", "non-number")),
     };
-    *exec.regMut(a) = RuntimeValue::Bool(result);
+    exec.set_reg(a, RuntimeValue::Bool(result));
     Ok(())
 }
 
@@ -515,7 +582,7 @@ fn handle_not(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let a = inst.a();
     let b = inst.b();
     let val = exec.reg(b);
-    *exec.regMut(a) = RuntimeValue::Bool(!val.is_truthy());
+    exec.set_reg(a, RuntimeValue::Bool(!val.is_truthy()));
     Ok(())
 }
 
@@ -533,7 +600,7 @@ fn handle_is_type(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
         5 => matches!(val.tag, ValueTag::Func | ValueTag::Closure),
         _ => false,
     };
-    *exec.regMut(a) = RuntimeValue::Bool(matches);
+    exec.set_reg(a, RuntimeValue::Bool(matches));
     Ok(())
 }
 
@@ -610,7 +677,7 @@ fn handle_call(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let returnAddr = exec.ip;
     let stackStart = exec.stack.len();
 
-    exec.frames.push(CallFrame {
+    let mut frame = CallFrame {
         funcIndex,
         ip: 0,
         registers,
@@ -619,12 +686,13 @@ fn handle_call(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
         upvalues: frameUpvalues,
         tier: CompilationTier::Interpreter,
         ..Default::default()
-    });
+    };
+    frame.RebuildRegisterBitmap();
 
+    exec.frames.push(frame);
     exec.currentFuncIndex = exec.frames.len() - 1;
     exec.ip = 0;
 
-    // Update call counter for tiered compilation
     if let Some(counter) = exec.callCounters.iter_mut().find(|c| c.funcIndex == funcIndex) {
         counter.count += 1;
     } else {
@@ -705,7 +773,7 @@ fn handle_tail_call(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let currentReturnAddr = exec.frames.pop().map(|f| f.returnAddr).unwrap_or(0);
     let stackStart = exec.stack.len();
 
-    exec.frames.push(CallFrame {
+    let mut frame = CallFrame {
         funcIndex,
         ip: 0,
         registers,
@@ -714,8 +782,10 @@ fn handle_tail_call(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
         upvalues: frameUpvalues,
         tier: CompilationTier::Interpreter,
         ..Default::default()
-    });
+    };
+    frame.RebuildRegisterBitmap();
 
+    exec.frames.push(frame);
     exec.currentFuncIndex = exec.frames.len() - 1;
     exec.ip = 0;
     Ok(())
@@ -747,7 +817,7 @@ fn handle_closure(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     }
     upvalues.truncate(upvalueCount);
 
-    *exec.regMut(a) = RuntimeValue::Closure(funcIndex, upvalues);
+    exec.set_reg(a, RuntimeValue::Closure(funcIndex, upvalues));
     Ok(())
 }
 
@@ -763,7 +833,7 @@ fn handle_load_upvalue(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
             ObjectKind::Upvalue { value, .. } => value.clone(),
             _ => RuntimeValue::NIL.clone(),
         };
-        *exec.regMut(a) = val;
+        exec.set_reg(a, val);
         Ok(())
     } else {
         Err(RuntimeError::new(ErrorKind::IndexOutOfBounds, format!("upvalue index {upvIdx} out of bounds")))
@@ -771,10 +841,10 @@ fn handle_load_upvalue(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
 }
 
 fn handle_store_upvalue(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
-    let a = inst.a();
+    let _a = inst.a();
     let b = inst.b();
     let upvIdx = b as usize;
-    let val = exec.reg(a).clone();
+    let val = exec.reg(inst.a()).clone();
     let frame = exec.frame();
     if upvIdx < frame.upvalues.len() {
         let gcRef = frame.upvalues[upvIdx];
@@ -792,7 +862,7 @@ fn handle_store_upvalue(exec: &mut Executor, inst: Instruction) -> VmResult<()> 
 fn handle_close_upvalue(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let a = inst.a();
     let val = exec.reg(a).clone();
-    *exec.regMut(a) = val;
+    exec.set_reg(a, val);
     Ok(())
 }
 
@@ -801,7 +871,8 @@ fn handle_new_object(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let obj = GcObject::new_instance(Vec::new(), 0);
     let gcRef = exec.heap.AllocObj(obj);
     exec.globalRefs.push(gcRef);
-    *exec.regMut(a) = RuntimeValue::Object(gcRef);
+    exec.heap.WriteBarrier(gcRef, gcRef);
+    exec.set_reg(a, RuntimeValue::Object(gcRef));
     Ok(())
 }
 
@@ -810,7 +881,8 @@ fn handle_new_array(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let obj = GcObject::new_array(Vec::new());
     let gcRef = exec.heap.AllocObj(obj);
     exec.globalRefs.push(gcRef);
-    *exec.regMut(a) = RuntimeValue::Array(gcRef);
+    exec.heap.WriteBarrier(gcRef, gcRef);
+    exec.set_reg(a, RuntimeValue::Array(gcRef));
     Ok(())
 }
 
@@ -843,7 +915,7 @@ fn handle_get_field(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
                 .find(|(name, _)| name == &fieldName)
                 .map(|(_, v)| v.clone())
                 .unwrap_or(RuntimeValue::NIL.clone());
-            *exec.regMut(a) = val;
+            exec.set_reg(a, val);
         }
         _ => return Err(RuntimeError::type_error("object", "non-object")),
     }
@@ -872,7 +944,6 @@ fn handle_set_field(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
         _ => return Err(RuntimeError::type_error("object", "non-object")),
     };
 
-    // Write barrier: check if we're storing a young gen ref into an old gen object
     if let Some(newRef) = val.as_gc_ref() {
         exec.heap.WriteBarrier(gcRef, newRef);
     }
@@ -909,7 +980,7 @@ fn handle_aget(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     match &obj.kind {
         ObjectKind::Array { elements } => {
             let val = elements.get(idx).cloned().unwrap_or(RuntimeValue::NIL.clone());
-            *exec.regMut(a) = val;
+            exec.set_reg(a, val);
         }
         _ => return Err(RuntimeError::type_error("array", "non-array")),
     }
@@ -962,7 +1033,7 @@ fn handle_alen(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
         ObjectKind::Array { elements } => elements.len(),
         _ => return Err(RuntimeError::type_error("array", "non-array")),
     };
-    *exec.regMut(a) = RuntimeValue::Int(len as i64);
+    exec.set_reg(a, RuntimeValue::Int(len as i64));
     Ok(())
 }
 

@@ -6,6 +6,7 @@ use super::gc_strategy::GcStrategy;
 const YOUNG_GEN_MAX: usize = 1024;
 const OLD_GEN_MAX: usize = 4096;
 const SURVIVOR_MAX_AGE: u8 = 15;
+const CARD_TABLE_SIZE: usize = 4096;
 
 #[derive(Default)]
 pub struct Heap {
@@ -13,13 +14,13 @@ pub struct Heap {
     survivorFrom: Vec<GcObject>,
     survivorTo: Vec<GcObject>,
     oldGen: Vec<GcObject>,
-    nextYoungId: usize,
-    nextOldId: usize,
+    nextId: usize,
     allocCount: usize,
     minorGcCount: u64,
     majorGcCount: u64,
     cardTable: CardTable,
     forwardingTable: HashMap<usize, GcRef>,
+    rememberedSet: Vec<GcRef>,
 }
 
 impl Heap {
@@ -27,30 +28,36 @@ impl Heap {
         Heap::default()
     }
 
+    fn alloc_id(&mut self) -> usize {
+        let id = self.nextId;
+        self.nextId += 1;
+        id
+    }
+
     pub fn Alloc(&mut self, kind: ObjectKind) -> GcRef {
         if self.youngGen.len() >= YOUNG_GEN_MAX {
-            self.MinorGc();
+            self.MinorGc(&[]);
         }
-        let obj = match kind {
+        let id = self.alloc_id();
+        let mut obj = match kind {
             k @ ObjectKind::Instance { .. } => GcObject::new_instance_default(k),
             ObjectKind::Array { elements } => GcObject::new_array(elements),
             ObjectKind::Upvalue { value, .. } => GcObject::new_upvalue(value),
             ObjectKind::Str { chars } => GcObject::new_str(chars),
             ObjectKind::Bytes { data } => GcObject::new_bytes(data),
         };
-        let id = self.nextYoungId;
-        self.nextYoungId += 1;
+        obj.id = id;
         self.youngGen.push(obj);
         self.allocCount += 1;
         GcRef(id)
     }
 
-    pub fn AllocObj(&mut self, obj: GcObject) -> GcRef {
+    pub fn AllocObj(&mut self, mut obj: GcObject) -> GcRef {
         if self.youngGen.len() >= YOUNG_GEN_MAX {
-            self.MinorGc();
+            self.MinorGc(&[]);
         }
-        let id = self.nextYoungId;
-        self.nextYoungId += 1;
+        let id = self.alloc_id();
+        obj.id = id;
         self.youngGen.push(obj);
         self.allocCount += 1;
         GcRef(id)
@@ -59,8 +66,8 @@ impl Heap {
     pub fn PromoteObject(&mut self, mut obj: GcObject) -> GcRef {
         obj.generation = Generation::Old;
         obj.age = 0;
-        let id = self.nextOldId;
-        self.nextOldId += 1;
+        let id = self.alloc_id();
+        obj.id = id;
         self.oldGen.push(obj);
         GcRef(id)
     }
@@ -74,77 +81,145 @@ impl Heap {
     }
 
     fn find(&self, gcRef: GcRef) -> &GcObject {
-        if gcRef.0 < self.nextYoungId {
-            return &self.youngGen[gcRef.0];
+        for obj in &self.youngGen {
+            if obj.id == gcRef.0 { return obj; }
         }
-        if gcRef.0 < self.nextYoungId + self.survivorFrom.len() {
-            return &self.survivorFrom[gcRef.0 - self.nextYoungId];
+        for obj in &self.survivorFrom {
+            if obj.id == gcRef.0 { return obj; }
         }
-        let survivorToBase = self.nextYoungId + self.survivorFrom.len();
-        if gcRef.0 < survivorToBase + self.survivorTo.len() {
-            return &self.survivorTo[gcRef.0 - survivorToBase];
+        for obj in &self.survivorTo {
+            if obj.id == gcRef.0 { return obj; }
         }
-        let oldBase = survivorToBase + self.survivorTo.len();
-        if gcRef.0 < oldBase + self.oldGen.len() {
-            return &self.oldGen[gcRef.0 - oldBase];
+        for obj in &self.oldGen {
+            if obj.id == gcRef.0 { return obj; }
         }
-        panic!("GcRef {} out of range", gcRef.0);
+        panic!("GcRef({}) not found in any generation", gcRef.0);
     }
 
     fn find_mut(&mut self, gcRef: GcRef) -> &mut GcObject {
-        if gcRef.0 < self.nextYoungId {
-            return &mut self.youngGen[gcRef.0];
+        for obj in &mut self.youngGen {
+            if obj.id == gcRef.0 { return obj; }
         }
-        if gcRef.0 < self.nextYoungId + self.survivorFrom.len() {
-            return &mut self.survivorFrom[gcRef.0 - self.nextYoungId];
+        for obj in &mut self.survivorFrom {
+            if obj.id == gcRef.0 { return obj; }
         }
-        let survivorToBase = self.nextYoungId + self.survivorFrom.len();
-        if gcRef.0 < survivorToBase + self.survivorTo.len() {
-            return &mut self.survivorTo[gcRef.0 - survivorToBase];
+        for obj in &mut self.survivorTo {
+            if obj.id == gcRef.0 { return obj; }
         }
-        let oldBase = survivorToBase + self.survivorTo.len();
-        if gcRef.0 < oldBase + self.oldGen.len() {
-            return &mut self.oldGen[gcRef.0 - oldBase];
+        for obj in &mut self.oldGen {
+            if obj.id == gcRef.0 { return obj; }
         }
-        panic!("GcRef {} out of range", gcRef.0);
+        panic!("GcRef({}) not found in any generation", gcRef.0);
     }
 
-    pub fn MinorGc(&mut self) {
+    #[allow(dead_code, clippy::manual_find)]
+    fn try_find(&self, gcRef: GcRef) -> Option<&GcObject> {
+        for obj in &self.youngGen {
+            if obj.id == gcRef.0 { return Some(obj); }
+        }
+        for obj in &self.survivorFrom {
+            if obj.id == gcRef.0 { return Some(obj); }
+        }
+        for obj in &self.survivorTo {
+            if obj.id == gcRef.0 { return Some(obj); }
+        }
+        for obj in &self.oldGen {
+            if obj.id == gcRef.0 { return Some(obj); }
+        }
+        None
+    }
+
+    #[allow(clippy::manual_find)]
+    fn try_find_mut(&mut self, gcRef: GcRef) -> Option<&mut GcObject> {
+        for obj in &mut self.youngGen {
+            if obj.id == gcRef.0 { return Some(obj); }
+        }
+        for obj in &mut self.survivorFrom {
+            if obj.id == gcRef.0 { return Some(obj); }
+        }
+        for obj in &mut self.survivorTo {
+            if obj.id == gcRef.0 { return Some(obj); }
+        }
+        for obj in &mut self.oldGen {
+            if obj.id == gcRef.0 { return Some(obj); }
+        }
+        None
+    }
+
+    pub fn MinorGc(&mut self, roots: &[GcRef]) {
         self.minorGcCount += 1;
         self.forwardingTable.clear();
 
-        let mut copiedFromYoung: Vec<GcObject> = Vec::new();
-        let mut copiedFromSurvivor: Vec<GcObject> = Vec::new();
-        let mut promoted: Vec<GcObject> = Vec::new();
+        let mut worklist: Vec<GcRef> = roots.to_vec();
+        for r in self.rememberedSet.drain(..) {
+            worklist.push(r);
+        }
 
-        for (id, obj) in self.youngGen.drain(..).enumerate() {
-            let objId = id;
-            let (isSurvived, obj) = if obj.marked {
-                if obj.age + 1 >= SURVIVOR_MAX_AGE {
-                    (false, GcObject { ..obj })
-                } else {
-                    (true, GcObject { age: obj.age + 1, generation: Generation::Survivor, ..obj })
+        while let Some(r) = worklist.pop() {
+            if let Some(obj) = self.try_find_mut(r) {
+                if obj.marked { continue; }
+                obj.marked = true;
+                if obj.generation != Generation::Old {
+                    worklist.extend(obj.children());
                 }
-            } else {
-                (false, obj)
-            };
-            if isSurvived {
-                let newId = self.nextYoungId + self.survivorFrom.len() + self.survivorTo.len() + copiedFromSurvivor.len();
-                self.forwardingTable.insert(objId, GcRef(newId));
-                copiedFromYoung.push(obj);
             }
         }
 
-        let survivorFromBase = self.nextYoungId;
-        for (i, obj) in self.survivorFrom.drain(..).enumerate() {
-            let objId = survivorFromBase + i;
+        let young_snapshot: Vec<GcObject> = self.youngGen.drain(..).collect();
+        let survivor_snapshot: Vec<GcObject> = self.survivorFrom.drain(..).collect();
+
+        let mut copied_from_young: Vec<GcObject> = Vec::new();
+        let mut copied_from_survivor: Vec<GcObject> = Vec::new();
+        let mut promoted: Vec<GcObject> = Vec::new();
+
+        for obj in young_snapshot {
             if obj.marked {
                 if obj.age + 1 >= SURVIVOR_MAX_AGE {
-                    promoted.push(GcObject { age: obj.age + 1, generation: Generation::Old, ..obj });
+                    let new_id = self.alloc_id();
+                    self.forwardingTable.insert(obj.id, GcRef(new_id));
+                    promoted.push(GcObject {
+                        id: new_id,
+                        age: 0,
+                        generation: Generation::Old,
+                        marked: false,
+                        ..obj
+                    });
                 } else {
-                    let newId = self.nextYoungId + self.survivorTo.len() + copiedFromSurvivor.len() + copiedFromYoung.len();
-                    self.forwardingTable.insert(objId, GcRef(newId));
-                    copiedFromSurvivor.push(GcObject { age: obj.age + 1, generation: Generation::Survivor, ..obj });
+                    let new_id = self.alloc_id();
+                    self.forwardingTable.insert(obj.id, GcRef(new_id));
+                    copied_from_young.push(GcObject {
+                        id: new_id,
+                        age: obj.age + 1,
+                        generation: Generation::Survivor,
+                        marked: false,
+                        ..obj
+                    });
+                }
+            }
+        }
+
+        for obj in survivor_snapshot {
+            if obj.marked {
+                if obj.age + 1 >= SURVIVOR_MAX_AGE {
+                    let new_id = self.alloc_id();
+                    self.forwardingTable.insert(obj.id, GcRef(new_id));
+                    promoted.push(GcObject {
+                        id: new_id,
+                        age: 0,
+                        generation: Generation::Old,
+                        marked: false,
+                        ..obj
+                    });
+                } else {
+                    let new_id = self.alloc_id();
+                    self.forwardingTable.insert(obj.id, GcRef(new_id));
+                    copied_from_survivor.push(GcObject {
+                        id: new_id,
+                        age: obj.age + 1,
+                        generation: Generation::Survivor,
+                        marked: false,
+                        ..obj
+                    });
                 }
             }
         }
@@ -152,30 +227,26 @@ impl Heap {
         for obj in &mut promoted {
             Self::apply_forwarding(obj, &self.forwardingTable);
         }
-        for obj in &mut copiedFromYoung {
+        for obj in &mut copied_from_young {
             Self::apply_forwarding(obj, &self.forwardingTable);
         }
-        for obj in &mut copiedFromSurvivor {
+        for obj in &mut copied_from_survivor {
             Self::apply_forwarding(obj, &self.forwardingTable);
         }
 
-        for obj in promoted {
-            self.oldGen.push(obj);
-        }
-
-        self.survivorTo.extend(copiedFromYoung);
-        self.survivorTo.extend(copiedFromSurvivor);
+        self.oldGen.extend(promoted);
+        self.survivorTo.extend(copied_from_young);
+        self.survivorTo.extend(copied_from_survivor);
 
         std::mem::swap(&mut self.survivorFrom, &mut self.survivorTo);
         self.survivorTo.clear();
 
         self.cardTable.Clear();
+        self.rememberedSet.clear();
 
         if self.oldGen.len() >= OLD_GEN_MAX {
-            self.MajorGc();
+            self.MajorGc(roots);
         }
-
-        self.allocCount = 0;
     }
 
     fn apply_forwarding(obj: &mut GcObject, table: &HashMap<usize, GcRef>) {
@@ -215,55 +286,147 @@ impl Heap {
         }
     }
 
-    pub fn MajorGc(&mut self) {
+    pub fn MajorGc(&mut self, roots: &[GcRef]) {
         self.majorGcCount += 1;
+
         for obj in &mut self.oldGen {
             obj.marked = false;
         }
-        self.SweepOldGen();
+
+        let mut worklist: Vec<GcRef> = roots.to_vec();
+
+        for obj in &self.survivorFrom {
+            worklist.push(GcRef(obj.id));
+        }
+        for obj in &self.survivorTo {
+            worklist.push(GcRef(obj.id));
+        }
+        for obj in &self.youngGen {
+            worklist.push(GcRef(obj.id));
+        }
+
+        while let Some(r) = worklist.pop() {
+            if let Some(obj) = self.try_find_mut(r) {
+                if obj.marked { continue; }
+                obj.marked = true;
+                worklist.extend(obj.children());
+            }
+        }
+
+        let total_old = self.oldGen.len();
+        let survived_old = self.oldGen.iter().filter(|o| o.marked).count();
+
+        if total_old > 0 {
+            let frag_rate = (total_old - survived_old) as f64 / total_old as f64;
+            if frag_rate > 0.35 {
+                self.Lisp2Compact(roots);
+            } else {
+                self.SweepOldGen();
+            }
+        }
     }
 
     fn SweepOldGen(&mut self) {
         self.oldGen.retain(|obj| obj.marked);
     }
 
+    pub fn Lisp2Compact(&mut self, _roots: &[GcRef]) {
+        if self.oldGen.is_empty() { return; }
+
+        self.forwardingTable.clear();
+
+        let mut old_gen = std::mem::take(&mut self.oldGen);
+        let mut write_idx: usize = 0;
+
+        for read_idx in 0..old_gen.len() {
+            if old_gen[read_idx].marked {
+                if write_idx != read_idx {
+                    let (left, right) = old_gen.split_at_mut(read_idx);
+                    let moved = std::mem::replace(&mut left[write_idx], std::mem::take(&mut right[0]));
+                    self.forwardingTable.insert(moved.id, GcRef(left[write_idx].id));
+                }
+                write_idx += 1;
+            }
+        }
+
+        old_gen.truncate(write_idx);
+        self.oldGen = old_gen;
+
+        {
+            let old_snapshot: Vec<GcObject> = self.oldGen.drain(..).collect();
+            for mut obj in old_snapshot {
+                Self::apply_forwarding(&mut obj, &self.forwardingTable);
+                self.oldGen.push(obj);
+            }
+        }
+
+        {
+            let young_snapshot: Vec<GcObject> = self.youngGen.drain(..).collect();
+            for mut obj in young_snapshot {
+                Self::apply_forwarding(&mut obj, &self.forwardingTable);
+                self.youngGen.push(obj);
+            }
+        }
+
+        {
+            let sf_snapshot: Vec<GcObject> = self.survivorFrom.drain(..).collect();
+            for mut obj in sf_snapshot {
+                Self::apply_forwarding(&mut obj, &self.forwardingTable);
+                self.survivorFrom.push(obj);
+            }
+        }
+
+        {
+            let st_snapshot: Vec<GcObject> = self.survivorTo.drain(..).collect();
+            for mut obj in st_snapshot {
+                Self::apply_forwarding(&mut obj, &self.forwardingTable);
+                self.survivorTo.push(obj);
+            }
+        }
+    }
+
     pub fn WriteBarrier(&mut self, oldRef: GcRef, newRef: GcRef) {
         if self.is_in_old_gen(oldRef) && self.is_in_young_gen(newRef) {
             self.cardTable.MarkCard(newRef);
+            self.rememberedSet.push(newRef);
         }
     }
 
-    pub fn ScanRememberedSet(&mut self, _markFn: impl FnMut(GcRef)) {
-        for card in self.cardTable.DirtyCards() {
-            let _ = card;
-        }
-        self.cardTable.Clear();
+    pub fn is_in_old_gen(&self, r: GcRef) -> bool {
+        self.oldGen.iter().any(|o| o.id == r.0)
     }
 
-    fn is_in_old_gen(&self, r: GcRef) -> bool {
-        let survivorToBase = self.nextYoungId + self.survivorFrom.len();
-        let oldBase = survivorToBase + self.survivorTo.len();
-        r.0 >= oldBase
-    }
-
-    fn is_in_young_gen(&self, r: GcRef) -> bool {
-        r.0 < self.nextYoungId + self.survivorFrom.len() + self.survivorTo.len()
+    pub fn is_in_young_gen(&self, r: GcRef) -> bool {
+        self.youngGen.iter().any(|o| o.id == r.0)
+            || self.survivorFrom.iter().any(|o| o.id == r.0)
+            || self.survivorTo.iter().any(|o| o.id == r.0)
     }
 
     pub fn YoungGenSize(&self) -> usize {
         self.youngGen.len() + self.survivorFrom.len() + self.survivorTo.len()
     }
+
     pub fn OldGenSize(&self) -> usize {
         self.oldGen.len()
     }
+
     pub fn MinorGcCount(&self) -> u64 { self.minorGcCount }
     pub fn MajorGcCount(&self) -> u64 { self.majorGcCount }
+    pub fn AllocCount(&self) -> usize { self.allocCount }
 
     pub fn GetCardTable(&self) -> &CardTable {
         &self.cardTable
     }
     pub fn GetCardTableMut(&mut self) -> &mut CardTable {
         &mut self.cardTable
+    }
+
+    pub fn ApplyForwardingToValue(v: &mut RuntimeValue, table: &HashMap<usize, GcRef>) {
+        Self::forward_value(v, table);
+    }
+
+    pub fn GetForwardingTable(&self) -> &HashMap<usize, GcRef> {
+        &self.forwardingTable
     }
 }
 
@@ -273,11 +436,11 @@ impl GcStrategy for Heap {
     }
 
     fn MinorGc(&mut self) {
-        Heap::MinorGc(self)
+        Heap::MinorGc(self, &[])
     }
 
     fn MajorGc(&mut self) {
-        Heap::MajorGc(self)
+        Heap::MajorGc(self, &[])
     }
 
     fn WriteBarrier(&mut self, oldRef: GcRef, newRef: GcRef) {
@@ -285,7 +448,7 @@ impl GcStrategy for Heap {
     }
 
     fn CollectGarbage(&mut self) {
-        self.MinorGc();
+        self.MajorGc(&[]);
     }
 
     fn GetCardTable(&self) -> &CardTable {
@@ -324,7 +487,6 @@ impl GcObject {
 
 pub struct CardTable {
     cards: Vec<u8>,
-    dirtyCount: usize,
 }
 
 impl Default for CardTable {
@@ -336,17 +498,19 @@ impl Default for CardTable {
 impl CardTable {
     pub fn new() -> Self {
         CardTable {
-            cards: vec![0u8; 256],
-            dirtyCount: 0,
+            cards: vec![0u8; CARD_TABLE_SIZE],
         }
     }
 
-    pub fn MarkCard(&mut self, _ref: GcRef) {
-        let cardIdx = self.dirtyCount % self.cards.len();
-        if self.cards[cardIdx] == 0 {
-            self.dirtyCount += 1;
+    pub fn with_capacity(cap: usize) -> Self {
+        CardTable {
+            cards: vec![0u8; cap],
         }
-        self.cards[cardIdx] = 1;
+    }
+
+    pub fn MarkCard(&mut self, r: GcRef) {
+        let idx = r.0 % self.cards.len();
+        self.cards[idx] = 1;
     }
 
     pub fn DirtyCards(&self) -> Vec<usize> {
@@ -359,7 +523,11 @@ impl CardTable {
     }
 
     pub fn Clear(&mut self) {
-        self.cards = vec![0u8; 256];
-        self.dirtyCount = 0;
+        let cap = self.cards.len();
+        self.cards = vec![0u8; cap];
+    }
+
+    pub fn Len(&self) -> usize {
+        self.cards.len()
     }
 }

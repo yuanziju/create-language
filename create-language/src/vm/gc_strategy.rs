@@ -1,4 +1,4 @@
-use super::value::{GcRef, ObjectKind};
+use super::value::{GcRef, ObjectKind, CallFrame, RuntimeValue};
 use super::heap::CardTable;
 
 pub trait GcStrategy {
@@ -21,4 +21,26 @@ pub trait RootVisitor {
 
 pub trait RootSet {
     fn scan(&self, visitor: &mut impl RootVisitor);
+}
+
+pub struct StackRootSet<'a> {
+    pub frames: &'a [CallFrame],
+    pub stack: &'a [RuntimeValue],
+    pub globalRefs: &'a [GcRef],
+}
+
+impl RootSet for StackRootSet<'_> {
+    fn scan(&self, visitor: &mut impl RootVisitor) {
+        for frame in self.frames {
+            frame.ScanRoots(visitor);
+        }
+        for v in self.stack {
+            if let Some(r) = v.as_gc_ref() {
+                visitor.visit_ref(r);
+            }
+        }
+        for r in self.globalRefs {
+            visitor.visit_ref(*r);
+        }
+    }
 }

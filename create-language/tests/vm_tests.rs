@@ -741,7 +741,7 @@ fn test_gc_minor_collect() {
     let _r3 = heap.AllocObj(GcObject::new_instance(vec![], 0));
 
     assert!(heap.YoungGenSize() >= 3);
-    heap.MinorGc();
+    heap.MinorGc(&[]);
     // After GC, unreferenced objects are freed. But since we have no marked objects,
     // all should be freed. Let's just verify GC doesn't panic.
     assert!(heap.YoungGenSize() <= 3);
@@ -754,6 +754,79 @@ fn test_gc_heap_stats() {
     assert_eq!(heap.MajorGcCount(), 0);
     assert_eq!(heap.YoungGenSize(), 0);
     assert_eq!(heap.OldGenSize(), 0);
+}
+
+#[test]
+fn test_gc_minor_collects_dead() {
+    let mut heap = Heap::new();
+
+    let r1 = heap.AllocObj(GcObject::new_instance(vec![], 0));
+    let _r2 = heap.AllocObj(GcObject::new_instance(vec![], 0));
+    let _r3 = heap.AllocObj(GcObject::new_array(vec![Value::Int(42)]));
+
+    assert_eq!(heap.YoungGenSize(), 3);
+
+    heap.MinorGc(&[r1]);
+
+    assert!(heap.YoungGenSize() >= 1);
+    assert!(heap.MinorGcCount() >= 1);
+}
+
+#[test]
+fn test_gc_promotes_to_old() {
+    let mut heap = Heap::new();
+
+    let obj = GcObject::new_instance(vec![], 0);
+    let mut root = heap.AllocObj(obj);
+
+    for _ in 0..16 {
+        heap.MinorGc(&[root]);
+
+        let ft = heap.GetForwardingTable().clone();
+        if let Some(new_ref) = ft.get(&root.0) {
+            root = *new_ref;
+        }
+    }
+
+    assert!(heap.OldGenSize() > 0, "object should be promoted to old gen after 16 minor GCs");
+}
+
+#[test]
+fn test_gc_lisp2_compact() {
+    let mut heap = Heap::new();
+
+    let r1 = heap.PromoteObject(GcObject::new_instance(vec![], 0));
+    let _r2 = heap.PromoteObject(GcObject::new_instance(vec![], 0));
+    let r3 = heap.PromoteObject(GcObject::new_instance(vec![], 0));
+    let _r4 = heap.PromoteObject(GcObject::new_instance(vec![], 0));
+    let r5 = heap.PromoteObject(GcObject::new_instance(vec![], 0));
+
+    assert_eq!(heap.OldGenSize(), 5);
+
+    heap.MajorGc(&[r1, r3, r5]);
+
+    assert_eq!(heap.OldGenSize(), 3, "Lisp2 compact should retain only live objects");
+    assert!(heap.MajorGcCount() >= 1);
+}
+
+#[test]
+fn test_write_barrier_marks_card() {
+    let mut heap = Heap::new();
+
+    let old_obj = heap.PromoteObject(GcObject::new_instance(vec![], 0));
+    let young_obj = heap.AllocObj(GcObject::new_instance(vec![], 0));
+
+    heap.WriteBarrier(old_obj, young_obj);
+
+    let dirty = heap.GetCardTable().DirtyCards();
+    assert!(!dirty.is_empty(), "card table should have dirty cards after write barrier");
+
+    let expected_idx = young_obj.0 % heap.GetCardTable().Len();
+    assert!(dirty.contains(&expected_idx));
+
+    heap.GetCardTableMut().Clear();
+    let dirty_after_clear = heap.GetCardTable().DirtyCards();
+    assert!(dirty_after_clear.is_empty(), "card table should be empty after clear");
 }
 
 // ---- Tiered JIT ----

@@ -1,4 +1,5 @@
 use super::error::VmResult;
+use super::gc_strategy::RootVisitor;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeValue {
@@ -173,6 +174,7 @@ pub enum ObjectKind {
 
 #[derive(Debug, Clone)]
 pub struct GcObject {
+    pub id: usize,
     pub kind: ObjectKind,
     pub marked: bool,
     pub age: u8,
@@ -189,19 +191,19 @@ pub enum Generation {
 
 impl GcObject {
     pub fn new_instance(fields: Vec<(String, RuntimeValue)>, class: usize) -> Self {
-        GcObject { kind: ObjectKind::Instance { fields, class }, marked: false, age: 0, generation: Generation::Young, refcount: 1 }
+        GcObject { id: 0, kind: ObjectKind::Instance { fields, class }, marked: false, age: 0, generation: Generation::Young, refcount: 1 }
     }
     pub fn new_array(elements: Vec<RuntimeValue>) -> Self {
-        GcObject { kind: ObjectKind::Array { elements }, marked: false, age: 0, generation: Generation::Young, refcount: 1 }
+        GcObject { id: 0, kind: ObjectKind::Array { elements }, marked: false, age: 0, generation: Generation::Young, refcount: 1 }
     }
     pub fn new_upvalue(value: RuntimeValue) -> Self {
-        GcObject { kind: ObjectKind::Upvalue { value, closed: false }, marked: false, age: 0, generation: Generation::Young, refcount: 1 }
+        GcObject { id: 0, kind: ObjectKind::Upvalue { value, closed: false }, marked: false, age: 0, generation: Generation::Young, refcount: 1 }
     }
     pub fn new_str(chars: String) -> Self {
-        GcObject { kind: ObjectKind::Str { chars }, marked: false, age: 0, generation: Generation::Young, refcount: 1 }
+        GcObject { id: 0, kind: ObjectKind::Str { chars }, marked: false, age: 0, generation: Generation::Young, refcount: 1 }
     }
     pub fn new_bytes(data: Vec<u8>) -> Self {
-        GcObject { kind: ObjectKind::Bytes { data }, marked: false, age: 0, generation: Generation::Young, refcount: 1 }
+        GcObject { id: 0, kind: ObjectKind::Bytes { data }, marked: false, age: 0, generation: Generation::Young, refcount: 1 }
     }
 
     pub fn children(&self) -> Vec<GcRef> {
@@ -239,6 +241,19 @@ pub enum CompilationTier {
     OptimizingJit,
 }
 
+impl Default for GcObject {
+    fn default() -> Self {
+        GcObject {
+            id: 0,
+            kind: ObjectKind::Str { chars: String::new() },
+            marked: false,
+            age: 0,
+            generation: Generation::Young,
+            refcount: 0,
+        }
+    }
+}
+
 impl Default for CallFrame {
     fn default() -> Self {
         CallFrame {
@@ -250,6 +265,72 @@ impl Default for CallFrame {
             upvalues: Vec::new(),
             tier: CompilationTier::Interpreter,
             registers_bitmap: Vec::new(),
+        }
+    }
+}
+
+impl CallFrame {
+    pub fn ScanRoots(&self, visitor: &mut impl RootVisitor) {
+        for (i, reg) in self.registers.iter().enumerate() {
+            let word = i / 64;
+            let bit = i % 64;
+            if word < self.registers_bitmap.len() && (self.registers_bitmap[word] & (1 << bit)) != 0 {
+                if let Some(r) = reg.as_gc_ref() {
+                    visitor.visit_ref(r);
+                }
+            }
+        }
+        for u in &self.upvalues {
+            visitor.visit_ref(*u);
+        }
+    }
+
+    pub fn SetRegister(&mut self, idx: usize, val: RuntimeValue) {
+        if idx >= self.registers.len() {
+            self.registers.resize(idx + 1, RuntimeValue::NIL.clone());
+        }
+        self.registers[idx] = val;
+        self.update_bitmap(idx);
+    }
+
+    pub fn UpdateRegisterBitmap(&mut self, idx: usize) {
+        self.update_bitmap(idx);
+    }
+
+    fn update_bitmap(&mut self, idx: usize) {
+        let word = idx / 64;
+        let bit = idx % 64;
+        if word >= self.registers_bitmap.len() {
+            self.registers_bitmap.resize(word + 1, 0);
+        }
+        if idx < self.registers.len() {
+            if self.registers[idx].as_gc_ref().is_some() {
+                self.registers_bitmap[word] |= 1 << bit;
+            } else {
+                self.registers_bitmap[word] &= !(1 << bit);
+            }
+        }
+    }
+
+    pub fn ClearRegisterBitmap(&mut self) {
+        for w in self.registers_bitmap.iter_mut() {
+            *w = 0;
+        }
+    }
+
+    pub fn RebuildRegisterBitmap(&mut self) {
+        for w in self.registers_bitmap.iter_mut() {
+            *w = 0;
+        }
+        for (i, reg) in self.registers.iter().enumerate() {
+            if reg.as_gc_ref().is_some() {
+                let word = i / 64;
+                let bit = i % 64;
+                if word >= self.registers_bitmap.len() {
+                    self.registers_bitmap.resize(word + 1, 0);
+                }
+                self.registers_bitmap[word] |= 1 << bit;
+            }
         }
     }
 }
