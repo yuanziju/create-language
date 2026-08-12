@@ -618,6 +618,7 @@ fn handle_call(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
         returnAddr,
         upvalues: frameUpvalues,
         tier: CompilationTier::Interpreter,
+        ..Default::default()
     });
 
     exec.currentFuncIndex = exec.frames.len() - 1;
@@ -712,6 +713,7 @@ fn handle_tail_call(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
         returnAddr: currentReturnAddr,
         upvalues: frameUpvalues,
         tier: CompilationTier::Interpreter,
+        ..Default::default()
     });
 
     exec.currentFuncIndex = exec.frames.len() - 1;

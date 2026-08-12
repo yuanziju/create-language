@@ -1,7 +1,11 @@
 pub mod error;
+pub mod value;
+pub mod heap;
 pub mod memory;
 pub mod executor;
 pub mod jit;
+pub mod gc_strategy;
+pub mod executor_backend;
 
 use crate::binary::ModuleFile;
 use self::error::*;
@@ -47,6 +51,7 @@ impl Vm {
             returnAddr: 0,
             upvalues: Vec::new(),
             tier: memory::CompilationTier::Interpreter,
+            ..Default::default()
         };
 
         self.executor.frames.push(frame);
@@ -102,6 +107,7 @@ impl Vm {
             returnAddr: 0,
             upvalues,
             tier: memory::CompilationTier::Interpreter,
+            ..Default::default()
         };
 
         self.executor.Reset();

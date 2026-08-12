@@ -97,7 +97,6 @@ impl JitContext {
         funcIndex: usize,
         instructions: &[Instruction],
     ) -> CompilationTier {
-        self.compileCount += 1;
         self.CheckAndCompile(funcIndex, u64::MAX, instructions)
             .unwrap_or(CompilationTier::Interpreter)
     }

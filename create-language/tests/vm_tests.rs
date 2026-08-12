@@ -5,7 +5,7 @@ use create_language::constant_pool::Value as CpValue;
 use create_language::instruction::Instruction;
 use create_language::opcode::Opcode;
 use create_language::vm::error::{ErrorKind, RuntimeError};
-use create_language::vm::memory::{CompilationTier, GcObject, Heap, ObjectKind};
+use create_language::vm::memory::{CompilationTier, GcObject, Heap};
 use create_language::vm::{Value, Vm};
 
 fn make_module(
