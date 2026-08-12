@@ -1,6 +1,6 @@
 # AGENTS.md — 子代理协作工作流
 
-> 本文件仅供 AI 子代理调度使用。人类贡献者请参阅 [COMBUSTION.md](COMBUSTION.md)。
+> 本文件仅供 AI 子代理调度使用。人类贡献者请参阅 [CONTRIBUTION.md](CONTRIBUTION.md)。
 
 ## 核心原则
 
@@ -46,7 +46,7 @@ worker 编写代码
 ```
 /workspace/create-language/
   ├── AGENTS.md           ← 本文件（AI 工作流）
-  ├── COMBUSTION.md       ← 贡献指南（人类规范）
+  ├── CONTRIBUTION.md       ← 贡献指南（人类规范）
   ├── grammar.ebnf        ← 语法定义
   ├── spec.md             ← 项目规格说明
   ├── tests/              ← 集成测试

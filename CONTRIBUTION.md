@@ -1,4 +1,4 @@
-# COMBUSTION.md — 贡献指南
+# CONTRIBUTION.md — 贡献指南
 
 > 本文件供人类贡献者阅读。AI 代理工作流请参阅 [AGENTS.md](AGENTS.md)。
 
@@ -39,7 +39,7 @@
 ```
 /workspace/create-language/
   ├── AGENTS.md           ← AI 子代理工作流
-  ├── COMBUSTION.md       ← 本文件
+  ├── CONTRIBUTION.md     ← 本文件
   ├── grammar.ebnf        ← 语法定义
   ├── spec.md             ← 项目规格说明
   ├── tests/              ← 集成测试
@@ -48,11 +48,13 @@
       ├── ast.rs
       ├── token.rs
       ├── lexer.rs
-      └── parser/
-          ├── mod.rs
-          ├── expr.rs
-          ├── stmt.rs
-          └── decl.rs
+      ├── parser/
+      ├── compiler/
+      ├── vm/
+      ├── binary.rs
+      ├── constant_pool.rs
+      ├── instruction.rs
+      └── opcode.rs
 ```
 
 ## 禁止事项
