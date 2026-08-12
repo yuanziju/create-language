@@ -1,13 +1,13 @@
 pub mod error;
+pub mod memory;
 pub mod executor;
 pub mod jit;
-pub mod memory;
 
+use crate::binary::ModuleFile;
 use self::error::*;
 use self::executor::Executor;
 use self::jit::JitContext;
 use self::memory::RuntimeValue;
-use crate::binary::ModuleFile;
 
 pub use self::memory::RuntimeValue as Value;
 
@@ -32,12 +32,12 @@ impl Vm {
         vm
     }
 
-    pub fn LoadModule(&mut self, module: ModuleFile) -> VmResult<()> {
+    pub fn LoadModule(&mut self, module: ModuleFile) {
         let entryPoint = module.entryPoint as usize;
         let func = &module.functions[entryPoint];
 
         let mut registers = Vec::with_capacity(func.numRegisters);
-        registers.resize(func.numRegisters, RuntimeValue::Nil);
+        registers.resize(func.numRegisters, RuntimeValue::NIL.clone());
 
         let frame = memory::CallFrame {
             funcIndex: entryPoint,
@@ -46,13 +46,13 @@ impl Vm {
             stackStart: 0,
             returnAddr: 0,
             upvalues: Vec::new(),
+            tier: memory::CompilationTier::Interpreter,
         };
 
         self.executor.frames.push(frame);
         self.executor.LoadModule(module);
         self.executor.currentFuncIndex = 0;
         self.executor.ip = 0;
-        Ok(())
     }
 
     pub fn Exec(&mut self) -> VmResult<()> {
@@ -85,14 +85,12 @@ impl Vm {
 
         let mut registers = Vec::with_capacity(func.numRegisters);
         registers.extend(args);
-        registers.resize(func.numRegisters, RuntimeValue::Nil);
+        registers.resize(func.numRegisters, RuntimeValue::NIL.clone());
 
         let mut upvalues = Vec::new();
         for _upvDesc in &func.upvalueDescs {
-            let gcRef = self
-                .executor
-                .heap
-                .allocObj(memory::GcObject::new_upvalue(RuntimeValue::Nil, false));
+            let obj = memory::GcObject::new_upvalue(RuntimeValue::NIL.clone());
+            let gcRef = self.executor.heap.AllocObj(obj);
             upvalues.push(gcRef);
         }
 
@@ -103,6 +101,7 @@ impl Vm {
             stackStart: 0,
             returnAddr: 0,
             upvalues,
+            tier: memory::CompilationTier::Interpreter,
         };
 
         self.executor.Reset();
@@ -113,11 +112,14 @@ impl Vm {
 
         self.executor.Execute()?;
 
-        // Return value is on top of the stack
         if let Some(val) = self.executor.stack.pop() {
             Ok(val)
         } else {
-            Ok(RuntimeValue::Nil)
+            Ok(RuntimeValue::NIL.clone())
         }
+    }
+
+    pub fn CollectGarbage(&mut self) {
+        self.executor.CollectGarbage();
     }
 }

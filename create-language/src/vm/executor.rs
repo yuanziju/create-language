@@ -6,7 +6,7 @@ use crate::opcode::Opcode;
 use super::error::*;
 use super::memory::*;
 
-type Handler = fn(&mut Executor, Instruction) -> VmResult<()>;
+pub type Handler = fn(&mut Executor, Instruction) -> VmResult<()>;
 
 pub struct DispatchTable {
     handlers: [Handler; 256],
@@ -92,11 +92,42 @@ pub struct Executor {
     pub halted: bool,
     pub tryStack: Vec<usize>,
     pub currentFuncIndex: usize,
+    pub globalRefs: Vec<GcRef>,
+    pub inlineCache: InlineCache,
+    pub callCounters: Vec<CallCounter>,
 }
 
 impl Default for Executor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct InlineCache {
+    pub cachedClass: Option<usize>,
+    pub cachedFieldIdx: Option<usize>,
+    pub hitCount: u64,
+    pub missCount: u64,
+}
+
+impl InlineCache {
+    pub fn HitRate(&self) -> f64 {
+        let total = self.hitCount + self.missCount;
+        if total == 0 { 0.0 } else { self.hitCount as f64 / total as f64 }
+    }
+}
+
+#[derive(Debug)]
+pub struct CallCounter {
+    pub funcIndex: usize,
+    pub count: u64,
+    pub triggerTier: CompilationTier,
+}
+
+impl CallCounter {
+    pub fn new(funcIndex: usize) -> Self {
+        CallCounter { funcIndex, count: 0, triggerTier: CompilationTier::Interpreter }
     }
 }
 
@@ -112,6 +143,9 @@ impl Executor {
             halted: false,
             tryStack: Vec::new(),
             currentFuncIndex: 0,
+            globalRefs: Vec::new(),
+            inlineCache: InlineCache::default(),
+            callCounters: Vec::new(),
         }
     }
 
@@ -142,6 +176,7 @@ impl Executor {
         self.halted = false;
         self.tryStack.clear();
         self.currentFuncIndex = 0;
+        self.globalRefs.clear();
     }
 
     fn fetch(&mut self) -> Instruction {
@@ -177,33 +212,46 @@ impl Executor {
         let func = &module.functions[funcIndex];
         let cpVal = &func.constants[idx as usize];
         match cpVal {
-            CpValue::Nil => RuntimeValue::Nil,
+            CpValue::Nil => RuntimeValue::NIL.clone(),
             CpValue::Bool(b) => RuntimeValue::Bool(*b),
             CpValue::Int(i) => RuntimeValue::Int(*i),
             CpValue::Float(f) => RuntimeValue::Float(*f),
-            CpValue::String(s) => RuntimeValue::String(s.clone()),
-            CpValue::Function(f) => RuntimeValue::Function(*f as usize),
+            CpValue::String(s) => RuntimeValue::Str(s.clone()),
+            CpValue::Function(f) => RuntimeValue::Func(*f as usize),
         }
     }
 
-    #[allow(dead_code)]
-    fn push(&mut self, v: RuntimeValue) {
-        self.stack.push(v);
+    pub fn CollectGarbage(&mut self) {
+        let mut roots = Vec::new();
+        for frame in &self.frames {
+            for reg in &frame.registers {
+                if let Some(r) = reg.as_gc_ref() { roots.push(r); }
+                if let ValuePayload::Closure(ref c) = reg.payload {
+                    for r in &c.upvalues { roots.push(*r); }
+                }
+            }
+        }
+        for val in &self.stack {
+            if let Some(r) = val.as_gc_ref() { roots.push(r); }
+        }
+        for r in &self.globalRefs { roots.push(*r); }
+
+        for gcRef in &roots {
+            self.mark_root(*gcRef);
+        }
+
+        self.heap.MinorGc();
     }
 
-    fn getArithmetic(a: &RuntimeValue, b: &RuntimeValue) -> VmResult<(i64, i64, bool)> {
-        match (a, b) {
-            (RuntimeValue::Int(ia), RuntimeValue::Int(ib)) => Ok((*ia, *ib, false)),
-            (RuntimeValue::Float(fa), RuntimeValue::Float(fb)) => {
-                Ok((fa.to_bits() as i64, fb.to_bits() as i64, true))
-            }
-            (RuntimeValue::Int(ia), RuntimeValue::Float(fb)) => {
-                Ok((*ia, fb.to_bits() as i64, true))
-            }
-            (RuntimeValue::Float(fa), RuntimeValue::Int(ib)) => {
-                Ok((fa.to_bits() as i64, *ib, true))
-            }
-            _ => Err(RuntimeError::type_error("number", "non-number")),
+    fn mark_root(&mut self, gcRef: GcRef) {
+        let mut worklist = vec![gcRef];
+        while let Some(r) = worklist.pop() {
+            if r.0 >= self.heap.YoungGenSize() + self.heap.OldGenSize() { continue; }
+            let obj = self.heap.GetMut(r);
+            if obj.marked { continue; }
+            obj.marked = true;
+            let children = obj.children();
+            worklist.extend(children);
         }
     }
 
@@ -215,10 +263,10 @@ impl Executor {
         op: fn(i64, i64) -> i64,
         floatOp: fn(f64, f64) -> f64,
     ) -> VmResult<()> {
-        let (bv, cv, isFloat) = {
+        let (isFloat, bv, cv) = {
             let bVal = self.reg(b).clone();
             let cVal = self.reg(c).clone();
-            Self::getArithmetic(&bVal, &cVal)?
+            Self::get_arithmetic(&bVal, &cVal)?
         };
         let result = if isFloat {
             let bf = f64::from_bits(bv as u64);
@@ -230,15 +278,27 @@ impl Executor {
         *self.regMut(a) = result;
         Ok(())
     }
+
+    fn get_arithmetic(a: &RuntimeValue, b: &RuntimeValue) -> VmResult<(bool, i64, i64)> {
+        match (&a.payload, &b.payload) {
+            (ValuePayload::Int(ia), ValuePayload::Int(ib)) => Ok((false, *ia, *ib)),
+            (ValuePayload::Float(fa), ValuePayload::Float(fb)) => Ok((true, fa.to_bits() as i64, fb.to_bits() as i64)),
+            (ValuePayload::Int(ia), ValuePayload::Float(fb)) => Ok((true, *ia, fb.to_bits() as i64)),
+            (ValuePayload::Float(fa), ValuePayload::Int(ib)) => Ok((true, fa.to_bits() as i64, *ib)),
+            _ => Err(RuntimeError::type_error("number", "non-number")),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn is_number(a: &RuntimeValue) -> bool {
+        matches!(a.tag, ValueTag::Int | ValueTag::Float)
+    }
 }
 
 // ---- Handler implementations ----
 
 fn handle_unimplemented(_exec: &mut Executor, inst: Instruction) -> VmResult<()> {
-    Err(RuntimeError::new(
-        ErrorKind::Custom,
-        format!("unimplemented instruction: {:?}", inst.opcode()),
-    ))
+    Err(RuntimeError::new(ErrorKind::Custom, format!("unimplemented instruction: {:?}", inst.opcode())))
 }
 
 fn handle_halt(exec: &mut Executor, _inst: Instruction) -> VmResult<()> {
@@ -278,7 +338,7 @@ fn handle_loadbool(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
 
 fn handle_loadnil(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let a = inst.a();
-    *exec.regMut(a) = RuntimeValue::Nil;
+    *exec.regMut(a) = RuntimeValue::NIL.clone();
     Ok(())
 }
 
@@ -300,28 +360,22 @@ fn handle_div(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let c = inst.c();
     let bVal = exec.reg(b).clone();
     let cVal = exec.reg(c).clone();
-    match (&bVal, &cVal) {
-        (RuntimeValue::Int(l), RuntimeValue::Int(r)) => {
+    match (&bVal.payload, &cVal.payload) {
+        (ValuePayload::Int(l), ValuePayload::Int(r)) => {
             if *r == 0 {
-                return Err(RuntimeError::new(
-                    ErrorKind::DivisionByZero,
-                    "division by zero",
-                ));
+                return Err(RuntimeError::new(ErrorKind::DivisionByZero, "division by zero"));
             }
             *exec.regMut(a) = RuntimeValue::Int(l / r);
         }
-        (RuntimeValue::Float(l), RuntimeValue::Float(r)) => {
+        (ValuePayload::Float(l), ValuePayload::Float(r)) => {
             *exec.regMut(a) = RuntimeValue::Float(l / r);
         }
-        (RuntimeValue::Int(l), RuntimeValue::Float(r)) => {
+        (ValuePayload::Int(l), ValuePayload::Float(r)) => {
             *exec.regMut(a) = RuntimeValue::Float(*l as f64 / r);
         }
-        (RuntimeValue::Float(l), RuntimeValue::Int(r)) => {
+        (ValuePayload::Float(l), ValuePayload::Int(r)) => {
             if *r == 0 {
-                return Err(RuntimeError::new(
-                    ErrorKind::DivisionByZero,
-                    "division by zero",
-                ));
+                return Err(RuntimeError::new(ErrorKind::DivisionByZero, "division by zero"));
             }
             *exec.regMut(a) = RuntimeValue::Float(l / *r as f64);
         }
@@ -336,13 +390,10 @@ fn handle_mod(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let c = inst.c();
     let bVal = exec.reg(b).clone();
     let cVal = exec.reg(c).clone();
-    match (&bVal, &cVal) {
-        (RuntimeValue::Int(l), RuntimeValue::Int(r)) => {
+    match (&bVal.payload, &cVal.payload) {
+        (ValuePayload::Int(l), ValuePayload::Int(r)) => {
             if *r == 0 {
-                return Err(RuntimeError::new(
-                    ErrorKind::DivisionByZero,
-                    "modulo by zero",
-                ));
+                return Err(RuntimeError::new(ErrorKind::DivisionByZero, "modulo by zero"));
             }
             *exec.regMut(a) = RuntimeValue::Int(l % r);
             Ok(())
@@ -355,9 +406,9 @@ fn handle_neg(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let a = inst.a();
     let b = inst.b();
     let val = exec.reg(b).clone();
-    match val {
-        RuntimeValue::Int(i) => *exec.regMut(a) = RuntimeValue::Int(-i),
-        RuntimeValue::Float(f) => *exec.regMut(a) = RuntimeValue::Float(-f),
+    match val.payload {
+        ValuePayload::Int(i) => *exec.regMut(a) = RuntimeValue::Int(-i),
+        ValuePayload::Float(f) => *exec.regMut(a) = RuntimeValue::Float(-f),
         _ => return Err(RuntimeError::type_error("number", "non-number")),
     }
     Ok(())
@@ -379,8 +430,8 @@ fn handle_bit_not(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let a = inst.a();
     let b = inst.b();
     let val = exec.reg(b).clone();
-    match val {
-        RuntimeValue::Int(i) => *exec.regMut(a) = RuntimeValue::Int(!i),
+    match val.payload {
+        ValuePayload::Int(i) => *exec.regMut(a) = RuntimeValue::Int(!i),
         _ => return Err(RuntimeError::type_error("integer", "non-integer")),
     }
     Ok(())
@@ -398,8 +449,8 @@ fn handle_i2f(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let a = inst.a();
     let b = inst.b();
     let val = exec.reg(b).clone();
-    match val {
-        RuntimeValue::Int(i) => *exec.regMut(a) = RuntimeValue::Float(i as f64),
+    match val.payload {
+        ValuePayload::Int(i) => *exec.regMut(a) = RuntimeValue::Float(i as f64),
         _ => return Err(RuntimeError::type_error("integer", "non-integer")),
     }
     Ok(())
@@ -409,8 +460,8 @@ fn handle_f2i(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let a = inst.a();
     let b = inst.b();
     let val = exec.reg(b).clone();
-    match val {
-        RuntimeValue::Float(f) => *exec.regMut(a) = RuntimeValue::Int(f as i64),
+    match val.payload {
+        ValuePayload::Float(f) => *exec.regMut(a) = RuntimeValue::Int(f as i64),
         _ => return Err(RuntimeError::type_error("float", "non-float")),
     }
     Ok(())
@@ -432,11 +483,11 @@ fn handle_lt(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let c = inst.c();
     let bVal = exec.reg(b).clone();
     let cVal = exec.reg(c).clone();
-    let result = match (&bVal, &cVal) {
-        (RuntimeValue::Int(l), RuntimeValue::Int(r)) => l < r,
-        (RuntimeValue::Float(l), RuntimeValue::Float(r)) => l < r,
-        (RuntimeValue::Int(l), RuntimeValue::Float(r)) => (*l as f64) < *r,
-        (RuntimeValue::Float(l), RuntimeValue::Int(r)) => *l < (*r as f64),
+    let result = match (&bVal.payload, &cVal.payload) {
+        (ValuePayload::Int(l), ValuePayload::Int(r)) => l < r,
+        (ValuePayload::Float(l), ValuePayload::Float(r)) => l < r,
+        (ValuePayload::Int(l), ValuePayload::Float(r)) => (*l as f64) < *r,
+        (ValuePayload::Float(l), ValuePayload::Int(r)) => *l < (*r as f64),
         _ => return Err(RuntimeError::type_error("number", "non-number")),
     };
     *exec.regMut(a) = RuntimeValue::Bool(result);
@@ -449,11 +500,11 @@ fn handle_le(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let c = inst.c();
     let bVal = exec.reg(b).clone();
     let cVal = exec.reg(c).clone();
-    let result = match (&bVal, &cVal) {
-        (RuntimeValue::Int(l), RuntimeValue::Int(r)) => l <= r,
-        (RuntimeValue::Float(l), RuntimeValue::Float(r)) => l <= r,
-        (RuntimeValue::Int(l), RuntimeValue::Float(r)) => (*l as f64) <= *r,
-        (RuntimeValue::Float(l), RuntimeValue::Int(r)) => *l <= (*r as f64),
+    let result = match (&bVal.payload, &cVal.payload) {
+        (ValuePayload::Int(l), ValuePayload::Int(r)) => l <= r,
+        (ValuePayload::Float(l), ValuePayload::Float(r)) => l <= r,
+        (ValuePayload::Int(l), ValuePayload::Float(r)) => (*l as f64) <= *r,
+        (ValuePayload::Float(l), ValuePayload::Int(r)) => *l <= (*r as f64),
         _ => return Err(RuntimeError::type_error("number", "non-number")),
     };
     *exec.regMut(a) = RuntimeValue::Bool(result);
@@ -474,12 +525,12 @@ fn handle_is_type(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let typeCode = inst.c();
     let val = exec.reg(b);
     let matches = match typeCode {
-        0 => matches!(val, RuntimeValue::Nil),
-        1 => matches!(val, RuntimeValue::Bool(_)),
-        2 => matches!(val, RuntimeValue::Int(_)),
-        3 => matches!(val, RuntimeValue::Float(_)),
-        4 => matches!(val, RuntimeValue::String(_)),
-        5 => matches!(val, RuntimeValue::Function(_) | RuntimeValue::Closure(_, _)),
+        0 => matches!(val.tag, ValueTag::Nil),
+        1 => matches!(val.tag, ValueTag::Bool),
+        2 => matches!(val.tag, ValueTag::Int),
+        3 => matches!(val.tag, ValueTag::Float),
+        4 => matches!(val.tag, ValueTag::Str),
+        5 => matches!(val.tag, ValueTag::Func | ValueTag::Closure),
         _ => false,
     };
     *exec.regMut(a) = RuntimeValue::Bool(matches);
@@ -488,12 +539,7 @@ fn handle_is_type(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
 
 fn handle_jmp(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let a = inst.a();
-    let offset = if a == 0 {
-        inst.imm16_signed() as i32
-    } else {
-        inst.imm24_signed()
-    };
-    // offset is relative to the start of the jump instruction
+    let offset = if a == 0 { inst.imm16_signed() as i32 } else { inst.imm24_signed() };
     exec.ip = ((exec.ip as i32) + offset - 1) as usize;
     Ok(())
 }
@@ -503,7 +549,6 @@ fn handle_jmp_t(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let val = exec.reg(a);
     if val.is_truthy() {
         let offset = inst.imm16_signed() as i32;
-        // offset is relative to the start of the jump instruction
         exec.ip = ((exec.ip as i32) + offset - 1) as usize;
     }
     Ok(())
@@ -514,26 +559,24 @@ fn handle_jmp_f(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let val = exec.reg(a);
     if !val.is_truthy() {
         let offset = inst.imm16_signed() as i32;
-        // offset is relative to the start of the jump instruction
         exec.ip = ((exec.ip as i32) + offset - 1) as usize;
     }
     Ok(())
 }
 
 fn handle_call(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
-    let _a = inst.a(); // return value register
-    let b = inst.b(); // function register
-    let c = inst.c(); // argument count
+    let _a = inst.a();
+    let b = inst.b();
+    let c = inst.c();
     let funcVal = exec.reg(b).clone();
     let argCount = c as usize;
 
-    let (funcIndex, upvalues) = match &funcVal {
-        RuntimeValue::Function(idx) => (*idx, Vec::new()),
-        RuntimeValue::Closure(idx, upvs) => (*idx, upvs.clone()),
+    let (funcIndex, upvalues): (usize, Vec<GcRef>) = match &funcVal.payload {
+        ValuePayload::Func(idx) => (*idx, Vec::new()),
+        ValuePayload::Closure(c) => (c.funcIndex, c.upvalues.clone()),
         _ => return Err(RuntimeError::type_error("function", "non-function")),
     };
 
-    // Extract function info before mutable operations on exec
     let (arity, numRegisters, upvalueDescs) = {
         let module = exec.module.as_ref().expect("no module loaded");
         let func = &module.functions[funcIndex];
@@ -541,34 +584,26 @@ fn handle_call(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     };
 
     if arity != argCount {
-        return Err(RuntimeError::new(
-            ErrorKind::ArityMismatch,
-            format!("function expects {arity} arguments, got {argCount}"),
-        ));
+        return Err(RuntimeError::new(ErrorKind::ArityMismatch, format!("function expects {arity} arguments, got {argCount}")));
     }
 
-    // Read arguments from registers starting at b+1
     let mut args = Vec::with_capacity(argCount);
     for i in 0..argCount {
         args.push(exec.reg(b + 1 + i as u8).clone());
     }
 
-    // Create registers
     let mut registers = Vec::with_capacity(numRegisters);
     registers.extend(args);
-    registers.resize(numRegisters, RuntimeValue::Nil);
+    registers.resize(numRegisters, RuntimeValue::NIL.clone());
 
-    // Set up upvalues
     let mut frameUpvalues = Vec::new();
     for upvDesc in &upvalueDescs {
         let idx = upvDesc.index;
         if idx < upvalues.len() {
             frameUpvalues.push(upvalues[idx]);
         } else {
-            frameUpvalues.push(
-                exec.heap
-                    .allocObj(GcObject::new_upvalue(RuntimeValue::Nil, false)),
-            );
+            let obj = GcObject::new_upvalue(RuntimeValue::NIL.clone());
+            frameUpvalues.push(exec.heap.AllocObj(obj));
         }
     }
 
@@ -582,10 +617,19 @@ fn handle_call(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
         stackStart,
         returnAddr,
         upvalues: frameUpvalues,
+        tier: CompilationTier::Interpreter,
     });
 
     exec.currentFuncIndex = exec.frames.len() - 1;
     exec.ip = 0;
+
+    // Update call counter for tiered compilation
+    if let Some(counter) = exec.callCounters.iter_mut().find(|c| c.funcIndex == funcIndex) {
+        counter.count += 1;
+    } else {
+        exec.callCounters.push(CallCounter::new(funcIndex));
+    }
+
     Ok(())
 }
 
@@ -593,7 +637,6 @@ fn handle_return(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let a = inst.a();
     let retVal = exec.reg(a).clone();
 
-    // Pop the current frame
     if exec.frames.is_empty() {
         exec.halted = true;
         return Ok(());
@@ -602,12 +645,10 @@ fn handle_return(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let frame = exec.frames.pop().expect("no frame to return from");
     let returnAddr = frame.returnAddr;
 
-    // Restore stack and push return value
     exec.stack.truncate(frame.stackStart);
     exec.stack.push(retVal);
 
     if exec.frames.is_empty() {
-        // Returned from main function
         exec.halted = true;
         return Ok(());
     }
@@ -618,19 +659,18 @@ fn handle_return(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
 }
 
 fn handle_tail_call(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
-    let a = inst.a(); // function register
-    let b = inst.b(); // argument register start
-    let c = inst.c(); // argument count
+    let a = inst.a();
+    let b = inst.b();
+    let c = inst.c();
     let funcVal = exec.reg(a).clone();
     let argCount = c as usize;
 
-    let (funcIndex, upvalues) = match &funcVal {
-        RuntimeValue::Function(idx) => (*idx, Vec::new()),
-        RuntimeValue::Closure(idx, upvs) => (*idx, upvs.clone()),
+    let (funcIndex, upvalues): (usize, Vec<GcRef>) = match &funcVal.payload {
+        ValuePayload::Func(idx) => (*idx, Vec::new()),
+        ValuePayload::Closure(c) => (c.funcIndex, c.upvalues.clone()),
         _ => return Err(RuntimeError::type_error("function", "non-function")),
     };
 
-    // Extract function info before mutable operations
     let (arity, numRegisters, upvalueDescs) = {
         let module = exec.module.as_ref().expect("no module loaded");
         let func = &module.functions[funcIndex];
@@ -638,22 +678,17 @@ fn handle_tail_call(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     };
 
     if arity != argCount {
-        return Err(RuntimeError::new(
-            ErrorKind::ArityMismatch,
-            format!("function expects {arity} arguments, got {argCount}"),
-        ));
+        return Err(RuntimeError::new(ErrorKind::ArityMismatch, format!("function expects {arity} arguments, got {argCount}")));
     }
 
-    // Read arguments from registers starting at b
     let mut args = Vec::with_capacity(argCount);
     for i in 0..argCount {
         args.push(exec.reg(b + i as u8).clone());
     }
 
-    // Reuse current frame
     let mut registers = Vec::with_capacity(numRegisters);
     registers.extend(args);
-    registers.resize(numRegisters, RuntimeValue::Nil);
+    registers.resize(numRegisters, RuntimeValue::NIL.clone());
 
     let mut frameUpvalues = Vec::new();
     for upvDesc in &upvalueDescs {
@@ -661,14 +696,11 @@ fn handle_tail_call(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
         if idx < upvalues.len() {
             frameUpvalues.push(upvalues[idx]);
         } else {
-            frameUpvalues.push(
-                exec.heap
-                    .allocObj(GcObject::new_upvalue(RuntimeValue::Nil, false)),
-            );
+            let obj = GcObject::new_upvalue(RuntimeValue::NIL.clone());
+            frameUpvalues.push(exec.heap.AllocObj(obj));
         }
     }
 
-    // Pop current frame and reuse its return address
     let currentReturnAddr = exec.frames.pop().map(|f| f.returnAddr).unwrap_or(0);
     let stackStart = exec.stack.len();
 
@@ -679,6 +711,7 @@ fn handle_tail_call(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
         stackStart,
         returnAddr: currentReturnAddr,
         upvalues: frameUpvalues,
+        tier: CompilationTier::Interpreter,
     });
 
     exec.currentFuncIndex = exec.frames.len() - 1;
@@ -693,29 +726,23 @@ fn handle_closure(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let funcIndex = b as usize;
     let upvalueCount = c as usize;
 
-    // For now, collect upvalues from the current frame's upvalues
     let mut upvalues = Vec::new();
     let module = exec.module.as_ref().expect("no module loaded");
     let func = &module.functions[funcIndex];
     for upvDesc in &func.upvalueDescs {
         let idx = upvDesc.index;
-        let frameIdx = if exec.frames.len() > 1 {
-            exec.frames.len() - 2
-        } else {
-            0
-        };
+        let frameIdx = if exec.frames.len() > 1 { exec.frames.len() - 2 } else { 0 };
         if frameIdx < exec.frames.len() {
             let val = exec.frames[frameIdx].registers[idx].clone();
-            let gcRef = exec.heap.allocObj(GcObject::new_upvalue(val, false));
+            let obj = GcObject::new_upvalue(val);
+            let gcRef = exec.heap.AllocObj(obj);
             upvalues.push(gcRef);
         } else {
-            let gcRef = exec
-                .heap
-                .allocObj(GcObject::new_upvalue(RuntimeValue::Nil, false));
+            let obj = GcObject::new_upvalue(RuntimeValue::NIL.clone());
+            let gcRef = exec.heap.AllocObj(obj);
             upvalues.push(gcRef);
         }
     }
-    // Ensure we have the right count
     upvalues.truncate(upvalueCount);
 
     *exec.regMut(a) = RuntimeValue::Closure(funcIndex, upvalues);
@@ -729,18 +756,15 @@ fn handle_load_upvalue(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let frame = exec.frame();
     if upvIdx < frame.upvalues.len() {
         let gcRef = frame.upvalues[upvIdx];
-        let obj = exec.heap.get(gcRef);
+        let obj = exec.heap.Get(gcRef);
         let val = match &obj.kind {
-            ObjectKind::UpvalueData(v, _) => v.clone(),
-            _ => RuntimeValue::Nil,
+            ObjectKind::Upvalue { value, .. } => value.clone(),
+            _ => RuntimeValue::NIL.clone(),
         };
         *exec.regMut(a) = val;
         Ok(())
     } else {
-        Err(RuntimeError::new(
-            ErrorKind::IndexOutOfBounds,
-            format!("upvalue index {upvIdx} out of bounds"),
-        ))
+        Err(RuntimeError::new(ErrorKind::IndexOutOfBounds, format!("upvalue index {upvIdx} out of bounds")))
     }
 }
 
@@ -752,17 +776,14 @@ fn handle_store_upvalue(exec: &mut Executor, inst: Instruction) -> VmResult<()> 
     let frame = exec.frame();
     if upvIdx < frame.upvalues.len() {
         let gcRef = frame.upvalues[upvIdx];
-        let obj = exec.heap.getMut(gcRef);
-        if let ObjectKind::UpvalueData(ref mut v, ref mut closed) = obj.kind {
-            *v = val;
+        let obj = exec.heap.GetMut(gcRef);
+        if let ObjectKind::Upvalue { ref mut value, ref mut closed } = obj.kind {
+            *value = val;
             *closed = true;
         }
         Ok(())
     } else {
-        Err(RuntimeError::new(
-            ErrorKind::IndexOutOfBounds,
-            format!("upvalue index {upvIdx} out of bounds"),
-        ))
+        Err(RuntimeError::new(ErrorKind::IndexOutOfBounds, format!("upvalue index {upvIdx} out of bounds")))
     }
 }
 
@@ -775,14 +796,18 @@ fn handle_close_upvalue(exec: &mut Executor, inst: Instruction) -> VmResult<()> 
 
 fn handle_new_object(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let a = inst.a();
-    let gcRef = exec.heap.alloc(ObjectKind::Object(Vec::new()));
+    let obj = GcObject::new_instance(Vec::new(), 0);
+    let gcRef = exec.heap.AllocObj(obj);
+    exec.globalRefs.push(gcRef);
     *exec.regMut(a) = RuntimeValue::Object(gcRef);
     Ok(())
 }
 
 fn handle_new_array(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let a = inst.a();
-    let gcRef = exec.heap.alloc(ObjectKind::Array(Vec::new()));
+    let obj = GcObject::new_array(Vec::new());
+    let gcRef = exec.heap.AllocObj(obj);
+    exec.globalRefs.push(gcRef);
     *exec.regMut(a) = RuntimeValue::Array(gcRef);
     Ok(())
 }
@@ -792,35 +817,30 @@ fn handle_get_field(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let b = inst.b();
     let fieldIdx = inst.c() as u16;
     let objVal = exec.reg(b).clone();
-    let fieldName = match &objVal {
-        RuntimeValue::Object(_gcRef) => {
-            let module = exec.module.as_ref().expect("no module loaded");
-            let funcIndex = exec.frames[exec.currentFuncIndex].funcIndex;
-            let func = &module.functions[funcIndex];
-            match &func.constants[fieldIdx as usize] {
-                CpValue::String(s) => s.clone(),
-                _ => {
-                    return Err(RuntimeError::new(
-                        ErrorKind::Custom,
-                        "field name must be a string constant",
-                    ))
-                }
-            }
-        }
+
+    let gcRef = match &objVal.payload {
+        ValuePayload::Object(r) => *r,
         _ => return Err(RuntimeError::type_error("object", "non-object")),
     };
-    let gcRef = match &objVal {
-        RuntimeValue::Object(r) => *r,
-        _ => unreachable!(),
+
+    let fieldName = {
+        let module = exec.module.as_ref().expect("no module loaded");
+        let funcIndex = exec.frames[exec.currentFuncIndex].funcIndex;
+        let func = &module.functions[funcIndex];
+        match &func.constants[fieldIdx as usize] {
+            CpValue::String(s) => s.clone(),
+            _ => return Err(RuntimeError::new(ErrorKind::Custom, "field name must be a string constant")),
+        }
     };
-    let obj = exec.heap.get(gcRef);
+
+    let obj = exec.heap.Get(gcRef);
     match &obj.kind {
-        ObjectKind::Object(fields) => {
+        ObjectKind::Instance { fields, .. } => {
             let val = fields
                 .iter()
                 .find(|(name, _)| name == &fieldName)
                 .map(|(_, v)| v.clone())
-                .unwrap_or(RuntimeValue::Nil);
+                .unwrap_or(RuntimeValue::NIL.clone());
             *exec.regMut(a) = val;
         }
         _ => return Err(RuntimeError::type_error("object", "non-object")),
@@ -829,35 +849,35 @@ fn handle_get_field(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
 }
 
 fn handle_set_field(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
-    let a = inst.a(); // value register
-    let b = inst.b(); // object register
+    let a = inst.a();
+    let b = inst.b();
     let fieldIdx = inst.c() as u16;
     let val = exec.reg(a).clone();
     let objVal = exec.reg(b).clone();
-    let fieldName = match &objVal {
-        RuntimeValue::Object(_) => {
-            let module = exec.module.as_ref().expect("no module loaded");
-            let funcIndex = exec.frames[exec.currentFuncIndex].funcIndex;
-            let func = &module.functions[funcIndex];
-            match &func.constants[fieldIdx as usize] {
-                CpValue::String(s) => s.clone(),
-                _ => {
-                    return Err(RuntimeError::new(
-                        ErrorKind::Custom,
-                        "field name must be a string constant",
-                    ))
-                }
-            }
+
+    let fieldName = {
+        let module = exec.module.as_ref().expect("no module loaded");
+        let funcIndex = exec.frames[exec.currentFuncIndex].funcIndex;
+        let func = &module.functions[funcIndex];
+        match &func.constants[fieldIdx as usize] {
+            CpValue::String(s) => s.clone(),
+            _ => return Err(RuntimeError::new(ErrorKind::Custom, "field name must be a string constant")),
         }
+    };
+
+    let gcRef = match &objVal.payload {
+        ValuePayload::Object(r) => *r,
         _ => return Err(RuntimeError::type_error("object", "non-object")),
     };
-    let gcRef = match &objVal {
-        RuntimeValue::Object(r) => *r,
-        _ => unreachable!(),
-    };
-    let obj = exec.heap.getMut(gcRef);
+
+    // Write barrier: check if we're storing a young gen ref into an old gen object
+    if let Some(newRef) = val.as_gc_ref() {
+        exec.heap.WriteBarrier(gcRef, newRef);
+    }
+
+    let obj = exec.heap.GetMut(gcRef);
     match &mut obj.kind {
-        ObjectKind::Object(fields) => {
+        ObjectKind::Instance { ref mut fields, .. } => {
             if let Some((_, existing)) = fields.iter_mut().find(|(name, _)| name == &fieldName) {
                 *existing = val;
             } else {
@@ -875,18 +895,18 @@ fn handle_aget(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let c = inst.c();
     let arrVal = exec.reg(b).clone();
     let idxVal = exec.reg(c).clone();
-    let idx = match idxVal {
-        RuntimeValue::Int(i) => i as usize,
+    let idx = match idxVal.payload {
+        ValuePayload::Int(i) => i as usize,
         _ => return Err(RuntimeError::type_error("integer", "non-integer index")),
     };
-    let gcRef = match &arrVal {
-        RuntimeValue::Array(r) => *r,
+    let gcRef = match &arrVal.payload {
+        ValuePayload::Array(r) => *r,
         _ => return Err(RuntimeError::type_error("array", "non-array")),
     };
-    let obj = exec.heap.get(gcRef);
+    let obj = exec.heap.Get(gcRef);
     match &obj.kind {
-        ObjectKind::Array(elements) => {
-            let val = elements.get(idx).cloned().unwrap_or(RuntimeValue::Nil);
+        ObjectKind::Array { elements } => {
+            let val = elements.get(idx).cloned().unwrap_or(RuntimeValue::NIL.clone());
             *exec.regMut(a) = val;
         }
         _ => return Err(RuntimeError::type_error("array", "non-array")),
@@ -895,25 +915,30 @@ fn handle_aget(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
 }
 
 fn handle_aset(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
-    let a = inst.a(); // array ref register
-    let b = inst.b(); // index register
-    let c = inst.c(); // value register
+    let a = inst.a();
+    let b = inst.b();
+    let c = inst.c();
     let arrVal = exec.reg(a).clone();
     let idxVal = exec.reg(b).clone();
     let val = exec.reg(c).clone();
-    let idx = match idxVal {
-        RuntimeValue::Int(i) => i as usize,
+    let idx = match idxVal.payload {
+        ValuePayload::Int(i) => i as usize,
         _ => return Err(RuntimeError::type_error("integer", "non-integer index")),
     };
-    let gcRef = match &arrVal {
-        RuntimeValue::Array(r) => *r,
+    let gcRef = match &arrVal.payload {
+        ValuePayload::Array(r) => *r,
         _ => return Err(RuntimeError::type_error("array", "non-array")),
     };
-    let obj = exec.heap.getMut(gcRef);
+
+    if let Some(newRef) = val.as_gc_ref() {
+        exec.heap.WriteBarrier(gcRef, newRef);
+    }
+
+    let obj = exec.heap.GetMut(gcRef);
     match &mut obj.kind {
-        ObjectKind::Array(elements) => {
+        ObjectKind::Array { ref mut elements } => {
             if idx >= elements.len() {
-                elements.resize(idx + 1, RuntimeValue::Nil);
+                elements.resize(idx + 1, RuntimeValue::NIL.clone());
             }
             elements[idx] = val;
         }
@@ -926,13 +951,13 @@ fn handle_alen(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
     let a = inst.a();
     let b = inst.b();
     let arrVal = exec.reg(b).clone();
-    let gcRef = match &arrVal {
-        RuntimeValue::Array(r) => *r,
+    let gcRef = match &arrVal.payload {
+        ValuePayload::Array(r) => *r,
         _ => return Err(RuntimeError::type_error("array", "non-array")),
     };
-    let obj = exec.heap.get(gcRef);
+    let obj = exec.heap.Get(gcRef);
     let len = match &obj.kind {
-        ObjectKind::Array(elements) => elements.len(),
+        ObjectKind::Array { elements } => elements.len(),
         _ => return Err(RuntimeError::type_error("array", "non-array")),
     };
     *exec.regMut(a) = RuntimeValue::Int(len as i64);
@@ -940,12 +965,10 @@ fn handle_alen(exec: &mut Executor, inst: Instruction) -> VmResult<()> {
 }
 
 fn handle_import(_exec: &mut Executor, _inst: Instruction) -> VmResult<()> {
-    // Stub: import not yet implemented
     Ok(())
 }
 
 fn handle_export(_exec: &mut Executor, _inst: Instruction) -> VmResult<()> {
-    // Stub: export not yet implemented
     Ok(())
 }
 
@@ -967,11 +990,9 @@ fn handle_end_try(exec: &mut Executor, _inst: Instruction) -> VmResult<()> {
 }
 
 fn handle_wide(_exec: &mut Executor, _inst: Instruction) -> VmResult<()> {
-    // Wide prefix: ignore for now
     Ok(())
 }
 
 fn handle_line(_exec: &mut Executor, _inst: Instruction) -> VmResult<()> {
-    // Debug info: ignore
     Ok(())
 }
