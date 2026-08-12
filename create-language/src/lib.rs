@@ -10,3 +10,4 @@ pub mod compiler;
 pub mod constant_pool;
 pub mod instruction;
 pub mod opcode;
+pub mod vm;

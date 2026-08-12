@@ -15,6 +15,12 @@ pub struct ModuleFile {
     pub entryPoint: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct UpvalueDesc {
+    pub isLocal: bool,
+    pub index: usize,
+}
+
 pub struct Function {
     pub name: String,
     pub arity: usize,
@@ -22,6 +28,7 @@ pub struct Function {
     pub instructions: Vec<Instruction>,
     pub constants: Vec<Value>,
     pub upvalueCount: usize,
+    pub upvalueDescs: Vec<UpvalueDesc>,
 }
 
 pub struct Export {

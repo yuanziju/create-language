@@ -65,6 +65,7 @@ pub struct Function {
     pub instructions: Vec<Instruction>,
     pub constants: Vec<Value>,
     pub upvalueCount: usize,
+    pub upvalueDescs: Vec<crate::binary::UpvalueDesc>,
 }
 
 impl Default for Compiler {
@@ -105,6 +106,14 @@ impl Compiler {
                 instructions: self.instructions.clone(),
                 constants: self.constants.get_constants().to_vec(),
                 upvalueCount: self.upvalues.len(),
+                upvalueDescs: self
+                    .upvalues
+                    .iter()
+                    .map(|u| crate::binary::UpvalueDesc {
+                        isLocal: u.isLocal,
+                        index: u.localIndex,
+                    })
+                    .collect(),
             },
             errors: self.errors.clone(),
         }
