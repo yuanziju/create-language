@@ -5,9 +5,9 @@ use create_language::binary::{Function, ModuleFile, UpvalueDesc};
 use create_language::constant_pool::Value as CpValue;
 use create_language::instruction::Instruction;
 use create_language::opcode::Opcode;
-use create_language::vm::error::RuntimeError;
+use create_language::vm::error::{ErrorKind, RuntimeError};
 use create_language::vm::memory::{GcObject, Heap, ObjectKind};
-use create_language::vm::value::Value;
+use create_language::vm::Value;
 use create_language::vm::Vm;
 
 // ---------------------------------------------------------------------------
@@ -276,10 +276,8 @@ fn test_division_by_zero() {
     );
     let result = run_module(module);
     assert!(result.is_err());
-    match result.unwrap_err() {
-        RuntimeError::DivisionByZero => {}
-        e => panic!("expected DivisionByZero, got {e:?}"),
-    }
+    let err = result.unwrap_err();
+    assert_eq!(err.kind, ErrorKind::DivisionByZero);
 }
 
 #[test]
@@ -297,10 +295,8 @@ fn test_mod_by_zero() {
     );
     let result = run_module(module);
     assert!(result.is_err());
-    match result.unwrap_err() {
-        RuntimeError::DivisionByZero => {}
-        e => panic!("expected DivisionByZero, got {e:?}"),
-    }
+    let err = result.unwrap_err();
+    assert_eq!(err.kind, ErrorKind::DivisionByZero);
 }
 
 // ---------------------------------------------------------------------------
@@ -555,7 +551,6 @@ fn test_not() {
 
 #[test]
 fn test_istype_int() {
-    // IsType: a=dest, b=val, c=typeCode (2=int)
     let module = make_module(
         0,
         2,
@@ -608,15 +603,11 @@ fn test_istype_bool() {
 
 #[test]
 fn test_jmp() {
-    // Jmp with a=0 uses 16-bit offset; Jmp with a!=0 uses 24-bit offset
-    // Instruction::i puts imm in bits 8-31, so a = bits 8-15 = (imm & 0xFF)
-    // For Jmp: if a==0, offset = imm16_signed (bits 16-31), else offset = imm24_signed (bits 8-31)
     let module = make_module(
         0,
         3,
         vec![
             Instruction::ri(Opcode::Loadi, 0, 1),
-            // Build raw instruction: Jmp with a=0 (16-bit offset), offset=2
             Instruction::from_raw(Opcode::Jmp as u32 | (0 << 8) | (2 << 16)),
             Instruction::ri(Opcode::Loadi, 1, 99), // skipped
             Instruction::ri(Opcode::Loadi, 1, 42),
@@ -630,15 +621,13 @@ fn test_jmp() {
 
 #[test]
 fn test_jmpt_true() {
-    // JmpT: a=register to check, offset=imm16_signed (bits 16-31)
     let module = make_module(
         0,
         3,
         vec![
             Instruction::rri(Opcode::Loadbool, 2, 0, 1), // r2 = true
-            // JmpT with a=2, offset=2: put offset in bits 16-31
-            Instruction::from_raw(Opcode::JmpT as u32 | (2 << 8) | (2 << 16)), // a=2, offset=2
-            Instruction::ri(Opcode::Loadi, 1, 99),                             // skipped
+            Instruction::from_raw(Opcode::JmpT as u32 | (2 << 8) | (2 << 16)),
+            Instruction::ri(Opcode::Loadi, 1, 99), // skipped
             Instruction::ri(Opcode::Loadi, 1, 42),
             Instruction::rrr(Opcode::Return, 1, 0, 0),
         ],
@@ -650,14 +639,13 @@ fn test_jmpt_true() {
 
 #[test]
 fn test_jmpt_false() {
-    // JmpT with register 2, offset=2 (not taken since value is false)
     let module = make_module(
         0,
         3,
         vec![
             Instruction::rri(Opcode::Loadbool, 2, 0, 0), // r2 = false
-            Instruction::from_raw(Opcode::JmpT as u32 | (2 << 8) | (2 << 16)), // a=2, offset=2 (not taken)
-            Instruction::ri(Opcode::Loadi, 1, 99),                             // executed
+            Instruction::from_raw(Opcode::JmpT as u32 | (2 << 8) | (2 << 16)),
+            Instruction::ri(Opcode::Loadi, 1, 99), // executed
             Instruction::ri(Opcode::Loadi, 2, 42),
             Instruction::rrr(Opcode::Return, 1, 0, 0),
         ],
@@ -669,14 +657,13 @@ fn test_jmpt_false() {
 
 #[test]
 fn test_jmpf_false() {
-    // JmpF: a=register to check, offset=imm16_signed (bits 16-31)
     let module = make_module(
         0,
         3,
         vec![
             Instruction::rri(Opcode::Loadbool, 2, 0, 0), // r2 = false
-            Instruction::from_raw(Opcode::JmpF as u32 | (2 << 8) | (2 << 16)), // a=2, offset=2
-            Instruction::ri(Opcode::Loadi, 1, 99),       // skipped
+            Instruction::from_raw(Opcode::JmpF as u32 | (2 << 8) | (2 << 16)),
+            Instruction::ri(Opcode::Loadi, 1, 99), // skipped
             Instruction::ri(Opcode::Loadi, 1, 42),
             Instruction::rrr(Opcode::Return, 1, 0, 0),
         ],
@@ -745,7 +732,7 @@ fn test_tail_call() {
                 instructions: vec![
                     Instruction::rrk(Opcode::Loadk, 0, 0, 0),    // r0 = func 1
                     Instruction::ri(Opcode::Loadi, 1, 99),       // r1 = arg 0
-                    Instruction::rrr(Opcode::TailCall, 0, 1, 0), // tail-call with 1 arg
+                    Instruction::rrr(Opcode::TailCall, 0, 1, 1), // tail-call with 1 arg
                     Instruction::new(Opcode::Halt),
                 ],
                 constants: vec![CpValue::Function(1)],
@@ -832,8 +819,6 @@ fn test_new_array() {
 // ---------------------------------------------------------------------------
 // Array element access
 // ---------------------------------------------------------------------------
-// ASet: a=arrRef, b=index_reg, c=value_reg
-// AGet: a=dest, b=arrRef, c=index_reg
 
 #[test]
 fn test_aset_aget() {
@@ -850,10 +835,8 @@ fn test_aset_aget() {
                 Instruction::ri(Opcode::Loadi, 2, 20), // value 20
                 Instruction::ri(Opcode::Loadi, 3, 0),  // index 0
                 Instruction::ri(Opcode::Loadi, 4, 1),  // index 1
-                // ASet: a=arrRef, b=index_reg, c=value_reg
                 Instruction::rrr(Opcode::ASet, 0, 3, 1), // arr[0] = 10
                 Instruction::rrr(Opcode::ASet, 0, 4, 2), // arr[1] = 20
-                // AGet: a=dest, b=arrRef, c=index_reg
                 Instruction::rrr(Opcode::AGet, 1, 0, 4), // r1 = arr[1]
                 Instruction::rrr(Opcode::Return, 1, 0, 0),
             ],
@@ -887,7 +870,6 @@ fn test_alen() {
                 Instruction::rrr(Opcode::ASet, 0, 2, 1), // arr[1] = 10
                 Instruction::ri(Opcode::Loadi, 2, 2), // index 2
                 Instruction::rrr(Opcode::ASet, 0, 2, 1), // arr[2] = 10
-                // ALen: a=dest, b=arrRef
                 Instruction::rrr(Opcode::ALen, 3, 0, 0),
                 Instruction::rrr(Opcode::Return, 3, 0, 0),
             ],
@@ -906,8 +888,6 @@ fn test_alen() {
 // ---------------------------------------------------------------------------
 // GetField and SetField (object properties)
 // ---------------------------------------------------------------------------
-// SetField: a=value_reg, b=objRef_reg, fieldIdx=imm8() (constant pool index for field name)
-// GetField: a=dest, b=objRef_reg, fieldIdx=imm8() (constant pool index for field name)
 
 #[test]
 fn test_set_get_field() {
@@ -921,10 +901,8 @@ fn test_set_get_field() {
             instructions: vec![
                 Instruction::rrk(Opcode::NewObject, 0, 0, 0), // r0 = obj
                 Instruction::ri(Opcode::Loadi, 1, 42),        // r1 = 42
-                // SetField: a=value_reg, b=objRef_reg, c=field_const_index
-                Instruction::rrr(Opcode::SetField, 1, 0, 0), // obj."name" = 42
-                // GetField: a=dest, b=objRef_reg, c=field_const_index
-                Instruction::rrr(Opcode::GetField, 2, 0, 0), // r2 = obj."name"
+                Instruction::rrr(Opcode::SetField, 1, 0, 0),  // obj."name" = 42
+                Instruction::rrr(Opcode::GetField, 2, 0, 0),  // r2 = obj."name"
                 Instruction::rrr(Opcode::Return, 2, 0, 0),
             ],
             constants: vec![CpValue::String("name".into())],
@@ -983,17 +961,17 @@ fn test_wrong_arity() {
 #[test]
 fn test_gc_collect() {
     let mut heap = Heap::new();
-    let r1 = heap.alloc(GcObject::new_object(std::collections::HashMap::new()));
-    let r2 = heap.alloc(GcObject::new_array(vec![Value::Int(1), Value::Int(2)]));
-    let _r3 = heap.alloc(GcObject::new_string("orphan".into()));
+    let r1 = heap.allocObj(GcObject::new_object(vec![]));
+    let r2 = heap.allocObj(GcObject::new_array(vec![Value::Int(1), Value::Int(2)]));
+    let _r3 = heap.allocObj(GcObject::new_object(vec![]));
 
     let roots = vec![r1, r2];
     heap.collect(&roots);
 
-    let obj1 = heap.get(r1).unwrap();
+    let obj1 = heap.get(r1);
     assert!(matches!(obj1.kind, ObjectKind::Object(_)));
 
-    let obj2 = heap.get(r2).unwrap();
+    let obj2 = heap.get(r2);
     assert!(matches!(obj2.kind, ObjectKind::Array(_)));
 }
 
@@ -1003,7 +981,7 @@ fn test_gc_collect() {
 
 #[test]
 fn test_native_function_ptr() {
-    fn my_native(_args: &[Value]) -> std::result::Result<Value, RuntimeError> {
+    fn my_native(_args: &[Value]) -> Result<Value, RuntimeError> {
         Ok(Value::Int(42))
     }
 
@@ -1057,7 +1035,7 @@ fn test_closure_upvalue() {
     };
     let result = exec_func(module, 0, vec![]).unwrap();
     match result {
-        Value::Closure(_) => {}
+        Value::Closure(_, _) => {}
         _ => panic!("expected Closure, got {:?}", result),
     }
 }
@@ -1254,7 +1232,7 @@ fn test_store_upvalue() {
     };
     let result = exec_func(module, 0, vec![]).unwrap();
     match result {
-        Value::Closure(_) => {}
+        Value::Closure(_, _) => {}
         _ => panic!("expected Closure, got {:?}", result),
     }
 }

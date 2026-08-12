@@ -1,44 +1,62 @@
 use std::fmt;
 
-#[derive(Debug, Clone)]
-pub enum RuntimeError {
+#[derive(Debug, Clone, PartialEq)]
+pub enum ErrorKind {
     StackOverflow,
-    TypeMismatch {
-        expected: &'static str,
-        found: &'static str,
-    },
-    UndefinedVariable(String),
-    UndefinedFunction(String),
+    TypeMismatch,
     DivisionByZero,
-    IndexOutOfBounds {
-        len: usize,
-        index: usize,
-    },
+    IndexOutOfBounds,
+    ArityMismatch,
+    UndefinedFunction,
+    UndefinedVariable,
     NullReference,
-    Custom(String),
+    Custom,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeError {
+    pub kind: ErrorKind,
+    pub message: String,
+    pub trace: Vec<TraceFrame>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraceFrame {
+    pub funcName: String,
+    pub ip: usize,
+}
+
+pub type VmResult<T> = std::result::Result<T, RuntimeError>;
+
+impl RuntimeError {
+    pub fn new(kind: ErrorKind, msg: impl Into<String>) -> Self {
+        RuntimeError {
+            kind,
+            message: msg.into(),
+            trace: Vec::new(),
+        }
+    }
+
+    pub fn type_error(expected: &str, found: &str) -> Self {
+        RuntimeError::new(
+            ErrorKind::TypeMismatch,
+            format!("type mismatch: expected {expected}, found {found}"),
+        )
+    }
+
+    pub fn push_trace(&mut self, funcName: String, ip: usize) {
+        self.trace.push(TraceFrame { funcName, ip });
+    }
 }
 
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RuntimeError::StackOverflow => write!(f, "stack overflow"),
-            RuntimeError::TypeMismatch { expected, found } => {
-                write!(f, "type mismatch: expected {expected}, found {found}")
-            }
-            RuntimeError::UndefinedVariable(name) => {
-                write!(f, "undefined variable: {name}")
-            }
-            RuntimeError::UndefinedFunction(name) => {
-                write!(f, "undefined function: {name}")
-            }
-            RuntimeError::DivisionByZero => write!(f, "division by zero"),
-            RuntimeError::IndexOutOfBounds { len, index } => {
-                write!(f, "index out of bounds: len={len}, index={index}")
-            }
-            RuntimeError::NullReference => write!(f, "null reference"),
-            RuntimeError::Custom(msg) => write!(f, "{msg}"),
+        write!(f, "{:?}: {}", self.kind, self.message)?;
+        for frame in &self.trace {
+            write!(f, "\n  at {}:{}", frame.funcName, frame.ip)?;
         }
+        Ok(())
     }
 }
 
-pub type Result<T> = std::result::Result<T, RuntimeError>;
+impl std::error::Error for RuntimeError {}
