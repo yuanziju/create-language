@@ -50,6 +50,29 @@ pub enum Opcode {
     EndTry,
     Wide,
     Line,
+
+    // Match group (固定32位)
+    TableSwitch,
+    LookupSwitch,
+    Match,
+
+    // SIMD 基础 (固定32位)
+    VecAdd,
+    VecSub,
+    VecMul,
+    VecDiv,
+    VecCmpEq,
+    VecCmpLt,
+    VecCmpLe,
+    VecLoad,
+    VecStore,
+
+    // 协程 (固定32位)
+    Suspend,
+    Resume,
+
+    // 运算符重载 (固定32位)
+    InvokeSpecial,
 }
 
 impl Opcode {

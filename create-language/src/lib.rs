@@ -1,13 +1,17 @@
 #![allow(non_snake_case)]
 
-pub mod ast;
-pub mod lexer;
-pub mod parser;
-pub mod token;
-
-pub mod binary;
-pub mod compiler;
-pub mod constant_pool;
-pub mod instruction;
-pub mod opcode;
+pub mod frontend;
+pub mod ir;
+pub mod memory;
 pub mod vm;
+
+pub use frontend::ast;
+pub use frontend::lexer;
+pub use frontend::parser;
+pub use frontend::token;
+
+pub use ir::binary;
+pub use ir::compiler;
+pub use ir::constant_pool;
+pub use ir::instruction;
+pub use ir::opcode;

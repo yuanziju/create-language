@@ -192,6 +192,66 @@ impl Compiler {
         ip
     }
 
+    pub fn EmitTableSwitch(&mut self, reg: u8, base_const: u16) -> usize {
+        self.Emit(Instruction::ri(Opcode::TableSwitch, reg, base_const))
+    }
+
+    pub fn EmitLookupSwitch(&mut self, reg: u8, base_const: u16) -> usize {
+        self.Emit(Instruction::ri(Opcode::LookupSwitch, reg, base_const))
+    }
+
+    pub fn EmitMatch(&mut self, reg: u8, base_const: u16) -> usize {
+        self.Emit(Instruction::ri(Opcode::Match, reg, base_const))
+    }
+
+    pub fn EmitVecAdd(&mut self, a: u8, b: u8, c: u8) -> usize {
+        self.Emit(Instruction::rrr(Opcode::VecAdd, a, b, c))
+    }
+
+    pub fn EmitVecSub(&mut self, a: u8, b: u8, c: u8) -> usize {
+        self.Emit(Instruction::rrr(Opcode::VecSub, a, b, c))
+    }
+
+    pub fn EmitVecMul(&mut self, a: u8, b: u8, c: u8) -> usize {
+        self.Emit(Instruction::rrr(Opcode::VecMul, a, b, c))
+    }
+
+    pub fn EmitVecDiv(&mut self, a: u8, b: u8, c: u8) -> usize {
+        self.Emit(Instruction::rrr(Opcode::VecDiv, a, b, c))
+    }
+
+    pub fn EmitVecCmpEq(&mut self, a: u8, b: u8, c: u8) -> usize {
+        self.Emit(Instruction::rrr(Opcode::VecCmpEq, a, b, c))
+    }
+
+    pub fn EmitVecCmpLt(&mut self, a: u8, b: u8, c: u8) -> usize {
+        self.Emit(Instruction::rrr(Opcode::VecCmpLt, a, b, c))
+    }
+
+    pub fn EmitVecCmpLe(&mut self, a: u8, b: u8, c: u8) -> usize {
+        self.Emit(Instruction::rrr(Opcode::VecCmpLe, a, b, c))
+    }
+
+    pub fn EmitVecLoad(&mut self, a: u8, b: u8, imm: u8) -> usize {
+        self.Emit(Instruction::rri(Opcode::VecLoad, a, b, imm))
+    }
+
+    pub fn EmitVecStore(&mut self, a: u8, b: u8, imm: u8) -> usize {
+        self.Emit(Instruction::rri(Opcode::VecStore, a, b, imm))
+    }
+
+    pub fn EmitSuspend(&mut self, a: u8, imm: u16) -> usize {
+        self.Emit(Instruction::ri(Opcode::Suspend, a, imm))
+    }
+
+    pub fn EmitResume(&mut self, a: u8, imm: u16) -> usize {
+        self.Emit(Instruction::ri(Opcode::Resume, a, imm))
+    }
+
+    pub fn EmitInvokeSpecial(&mut self, a: u8, b: u8, c: u8) -> usize {
+        self.Emit(Instruction::rrr(Opcode::InvokeSpecial, a, b, c))
+    }
+
     pub fn EmitJump(&mut self, opcode: Opcode, reg: u8) -> usize {
         let ip = self.instructions.len();
         self.instructions.push(Instruction::ri(opcode, reg, 0));

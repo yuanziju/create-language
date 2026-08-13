@@ -76,6 +76,30 @@ impl DispatchTable {
         table[Opcode::EndTry as usize] = handle_end_try;
         table[Opcode::Wide as usize] = handle_wide;
         table[Opcode::Line as usize] = handle_line;
+
+        // Match group
+        table[Opcode::TableSwitch as usize] = handle_unimplemented;
+        table[Opcode::LookupSwitch as usize] = handle_unimplemented;
+        table[Opcode::Match as usize] = handle_unimplemented;
+
+        // SIMD
+        table[Opcode::VecAdd as usize] = handle_unimplemented;
+        table[Opcode::VecSub as usize] = handle_unimplemented;
+        table[Opcode::VecMul as usize] = handle_unimplemented;
+        table[Opcode::VecDiv as usize] = handle_unimplemented;
+        table[Opcode::VecCmpEq as usize] = handle_unimplemented;
+        table[Opcode::VecCmpLt as usize] = handle_unimplemented;
+        table[Opcode::VecCmpLe as usize] = handle_unimplemented;
+        table[Opcode::VecLoad as usize] = handle_unimplemented;
+        table[Opcode::VecStore as usize] = handle_unimplemented;
+
+        // Coroutine
+        table[Opcode::Suspend as usize] = handle_unimplemented;
+        table[Opcode::Resume as usize] = handle_unimplemented;
+
+        // Operator overloading
+        table[Opcode::InvokeSpecial as usize] = handle_unimplemented;
+
         DispatchTable { handlers: table }
     }
 }
@@ -196,7 +220,7 @@ impl Executor {
     fn fetch_at(&self, ip: usize) -> Instruction {
         let module = self.module.as_ref().expect("no module loaded");
         let funcIndex = self.frames[self.currentFuncIndex].funcIndex;
-        module.functions[funcIndex].instructions[ip]
+        module.functions[funcIndex].instructions[ip].clone()
     }
 
     pub fn LoadModule(&mut self, module: ModuleFile) {
@@ -219,7 +243,7 @@ impl Executor {
         self.ip += 1;
         let module = self.module.as_ref().expect("no module loaded");
         let funcIndex = self.frames[self.currentFuncIndex].funcIndex;
-        module.functions[funcIndex].instructions[ip]
+        module.functions[funcIndex].instructions[ip].clone()
     }
 
     fn frame(&self) -> &CallFrame {

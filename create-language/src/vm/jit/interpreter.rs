@@ -71,11 +71,11 @@ impl ExecutionBackend for InterpreterBackend {
         let mut ip = frame.ip;
 
         while ip < instructions.len() && !executor.halted {
-            let inst = instructions[ip];
+            let inst = instructions[ip].clone();
             self.instruction_count += 1;
 
             if inst.opcode() == Opcode::Call {
-                let ic_result = self.check_inline_cache(executor, inst);
+                let ic_result = self.check_inline_cache(executor, inst.clone());
                 if ic_result == Some(true) {}
             }
 

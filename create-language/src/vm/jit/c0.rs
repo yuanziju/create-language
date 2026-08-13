@@ -47,7 +47,7 @@ impl C0Stub {
         let mut ip = frame_ip;
 
         while ip < len && !executor.halted {
-            let inst = self.instructions[ip];
+            let inst = self.instructions[ip].clone();
 
             if inst.opcode() == Opcode::Call {
                 let func_val = executor.reg(inst.b()).clone();

@@ -1,4 +1,4 @@
-use super::error::VmResult;
+use crate::vm::error::VmResult;
 use super::gc_strategy::RootVisitor;
 
 #[derive(Debug, Clone)]
